@@ -18,7 +18,7 @@ namespace ClashControlConnector.Core
     {
         private HttpListener _listener;
         private CancellationTokenSource _cts;
-        private WebSocket _client;
+        private volatile WebSocket _client;
         private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
         private readonly int _port;
 
