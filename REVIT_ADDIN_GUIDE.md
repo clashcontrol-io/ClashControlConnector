@@ -1973,3 +1973,58 @@ private static void HandlePushClashes(UIApplication uiApp, List<JObject> clashes
 | Surface color invisible | No fill pattern set | Finds `SolidFill` pattern and sets it on the override |
 | Highlight lookup | Full collector scan + GlobalId computation | `ElementCache` O(1) lookup for highlights, direct `new ElementId(revitId)` for clashes |
 | Issues ignored | `push-clashes` handler skipped `issues` array | Issues handled with purple highlight |
+
+---
+
+## Error Handling Rules
+
+1. **No document open**: Send `{"type":"error","message":"No document open in Revit"}`
+2. **Element export fails**: Skip the element, log warning via `Debug.WriteLine`, continue with next element. Do NOT abort the entire export.
+3. **WebSocket disconnects mid-export**: Check `SendAsync` return value between batches. If `false`, stop exporting — don't accumulate unsent messages.
+4. **WebSocket disconnects at other times**: Keep the server running. Accept new connections. Do not crash Revit.
+5. **Large models**: Use batched sending (50 elements per `element-batch`). This prevents WebSocket frame size issues and lets ClashControl show progress.
+6. **Thread safety violations**: ALWAYS use `RevitCommandHandler.Enqueue()` for any Revit API call from the WebSocket message handler or debouncer timer. Direct calls from background threads WILL crash Revit.
+7. **Export cancelled**: Send `{"type":"model-error","message":"Export cancelled","elementsSent":N}` so the browser knows to stop waiting.
+8. **Concurrent exports**: Cancel any in-progress export before starting a new one. Only one export should run at a time.
+9. **Document switch during export**: The debouncer's `OnDocumentClosing` handler clears the cache. If an export is in progress, cancel it.
+
+---
+
+## Testing
+
+### Installation
+1. Build the project in Visual Studio (Release mode)
+2. Copy `ClashControlConnector.dll`, `ClashControlConnector.addin`, and `Newtonsoft.Json.dll` to `%APPDATA%\Autodesk\Revit\Addins\2024\` (or your Revit version)
+3. Open Revit — the plugin auto-starts the WebSocket server
+
+### Quick WebSocket Test (without ClashControl)
+Open browser console and run:
+```javascript
+var ws = new WebSocket('ws://localhost:19780');
+ws.onopen = () => { console.log('Connected'); ws.send('{"type":"ping"}'); };
+ws.onmessage = (e) => { console.log(JSON.parse(e.data)); };
+```
+You should see:
+1. `{type: "status", connected: true, documentName: "...", version: "1"}` — immediately on connect
+2. `{type: "pong"}` — in response to your ping
+
+### Full Integration Test with ClashControl
+1. Open a Revit model with some walls, ducts, and pipes
+2. Open ClashControl in a browser
+3. Click the Revit Bridge button (lightning bolt) in the left sidebar
+4. Under "Direct Connection (Live Link)", click **Connect**
+5. Click **Pull Model** — the model should stream into ClashControl with a progress bar
+6. Verify element count and categories match what's in Revit
+7. Run clash detection in ClashControl
+8. Click **Push Clashes** — clashing elements should highlight red/amber in Revit
+9. Click a single clash in ClashControl — the two elements should auto-highlight in Revit
+10. Click a different clash — previous highlight should clear, new one appears
+11. **Live update test**: With ClashControl connected, move a wall in Revit. After ~500ms, the wall should update in the browser.
+12. **Property-only test**: Change a wall's "Mark" parameter. The browser should receive a `properties-only` update (no geometry re-render in the 3D view).
+13. **Cancellation test**: Start an export on a large model, then send `{"type":"cancel-export"}`. Verify the browser receives `model-error` with `elementsSent`.
+
+### Performance Benchmarks to Watch
+- Export of 10k elements should complete in < 30 seconds
+- Debounced live update should arrive at browser within 1 second of edit completion
+- Highlight response should be < 200ms (cache lookup, no collector scan)
+- Memory usage should stay flat after initial export (no leaked geometry data)
