@@ -1794,3 +1794,182 @@ private static void OnDocumentClosing(object sender, DocumentClosingEventArgs e)
 | Delete 50 elements at once | 50 individual sends | 1 batched deletion |
 | Undo/redo | Full re-export | Diff detects no geometry change → property-only |
 | Rapid typing in schedule | Floods browser | 500ms debounce → 2 updates/second max |
+
+---
+
+## Element Highlight Management
+
+### The Problem
+
+The original guide applies `OverrideGraphicSettings` but never clears them. After a few `highlight` or `push-clashes` calls, the model is covered in stale red/orange overrides with no way to clean up.
+
+### Solution: Track and Clear
+
+Maintain a set of currently highlighted element IDs. Clear them before applying new highlights.
+
+```csharp
+// In App.cs — track highlighted elements
+private static readonly HashSet<ElementId> _highlightedElementIds = new HashSet<ElementId>();
+
+private static void ClearAllHighlights(UIApplication uiApp)
+{
+    var doc = uiApp.ActiveUIDocument?.Document;
+    if (doc == null || _highlightedElementIds.Count == 0) return;
+
+    using (var t = new Transaction(doc, "ClashControl: Clear Highlights"))
+    {
+        t.Start();
+        var view = doc.ActiveView;
+        var defaultOgs = new OverrideGraphicSettings(); // resets to default
+
+        foreach (var eid in _highlightedElementIds)
+        {
+            try { view.SetElementOverrides(eid, defaultOgs); }
+            catch { } // element may have been deleted
+        }
+
+        t.Commit();
+    }
+
+    _highlightedElementIds.Clear();
+}
+
+private static void HighlightElements(UIApplication uiApp, List<string> globalIds)
+{
+    var uidoc = uiApp.ActiveUIDocument;
+    if (uidoc == null) return;
+    var doc = uidoc.Document;
+
+    // Clear previous highlights first
+    ClearAllHighlights(uiApp);
+
+    // Resolve GlobalIds to ElementIds using the cache (O(1) per lookup)
+    var elementIds = new List<ElementId>();
+    foreach (var gid in globalIds)
+    {
+        var eid = _cache.FindByGlobalId(gid);
+        if (eid != null) elementIds.Add(eid);
+    }
+
+    if (elementIds.Count == 0) return;
+
+    // Select elements
+    uidoc.Selection.SetElementIds(elementIds);
+
+    // Color them
+    using (var t = new Transaction(doc, "ClashControl: Highlight"))
+    {
+        t.Start();
+        var view = doc.ActiveView;
+
+        var ogs = new OverrideGraphicSettings();
+        ogs.SetProjectionLineColor(new Color(239, 68, 68));           // red
+        ogs.SetSurfaceForegroundPatternColor(new Color(239, 68, 68));
+
+        // IMPORTANT: Set a solid fill pattern, otherwise the color override
+        // has no visible effect on shaded surfaces
+        var solidFill = new FilteredElementCollector(doc)
+            .OfClass(typeof(FillPatternElement))
+            .Cast<FillPatternElement>()
+            .FirstOrDefault(fp => fp.GetFillPattern().IsSolidFill);
+        if (solidFill != null)
+            ogs.SetSurfaceForegroundPatternId(solidFill.Id);
+
+        ogs.SetSurfaceTransparency(0);
+
+        foreach (var eid in elementIds)
+        {
+            view.SetElementOverrides(eid, ogs);
+            _highlightedElementIds.Add(eid);
+        }
+
+        t.Commit();
+    }
+}
+
+private static void HandlePushClashes(UIApplication uiApp, List<JObject> clashes, List<JObject> issues)
+{
+    var uidoc = uiApp.ActiveUIDocument;
+    if (uidoc == null) return;
+    var doc = uidoc.Document;
+
+    // Clear previous highlights
+    ClearAllHighlights(uiApp);
+
+    // Find the solid fill pattern once
+    var solidFill = new FilteredElementCollector(doc)
+        .OfClass(typeof(FillPatternElement))
+        .Cast<FillPatternElement>()
+        .FirstOrDefault(fp => fp.GetFillPattern().IsSolidFill);
+
+    using (var t = new Transaction(doc, "ClashControl: Mark Clashes"))
+    {
+        t.Start();
+        var view = doc.ActiveView;
+
+        // Hard clash style (red)
+        var hardOgs = new OverrideGraphicSettings();
+        hardOgs.SetProjectionLineColor(new Color(239, 68, 68));
+        hardOgs.SetSurfaceForegroundPatternColor(new Color(239, 68, 68));
+        if (solidFill != null) hardOgs.SetSurfaceForegroundPatternId(solidFill.Id);
+
+        // Clearance clash style (amber)
+        var clearanceOgs = new OverrideGraphicSettings();
+        clearanceOgs.SetProjectionLineColor(new Color(245, 158, 11));
+        clearanceOgs.SetSurfaceForegroundPatternColor(new Color(245, 158, 11));
+        if (solidFill != null) clearanceOgs.SetSurfaceForegroundPatternId(solidFill.Id);
+
+        // Issue style (purple)
+        var issueOgs = new OverrideGraphicSettings();
+        issueOgs.SetProjectionLineColor(new Color(139, 92, 246));
+        issueOgs.SetSurfaceForegroundPatternColor(new Color(139, 92, 246));
+        if (solidFill != null) issueOgs.SetSurfaceForegroundPatternId(solidFill.Id);
+
+        // Apply clash highlights — resolve by revitId directly (no collector scan)
+        foreach (var clash in clashes)
+        {
+            var clashType = clash["type"]?.ToString() ?? "hard";
+            var ogs = clashType == "clearance" ? clearanceOgs : hardOgs;
+
+            void ApplyOverride(JToken elementToken)
+            {
+                var revitId = elementToken?["revitId"]?.ToObject<int?>() ?? 0;
+                if (revitId <= 0) return;
+                var eid = new ElementId(revitId);
+                view.SetElementOverrides(eid, ogs);
+                _highlightedElementIds.Add(eid);
+            }
+
+            ApplyOverride(clash["elementA"]);
+            ApplyOverride(clash["elementB"]);
+        }
+
+        // Apply issue highlights
+        foreach (var issue in issues)
+        {
+            var elementIds = issue["elementIds"]?.ToObject<List<JObject>>() ?? new List<JObject>();
+            foreach (var elRef in elementIds)
+            {
+                var revitId = elRef["revitId"]?.ToObject<int?>() ?? 0;
+                if (revitId <= 0) continue;
+                var eid = new ElementId(revitId);
+                view.SetElementOverrides(eid, issueOgs);
+                _highlightedElementIds.Add(eid);
+            }
+        }
+
+        t.Commit();
+    }
+
+    Debug.WriteLine($"[CC] Highlighted {clashes.Count} clashes + {issues.Count} issues");
+}
+```
+
+### Key Fixes vs Original Guide
+
+| Issue | Original | Fixed |
+|---|---|---|
+| Stale highlights | Never cleared | `ClearAllHighlights()` called before each new highlight |
+| Surface color invisible | No fill pattern set | Finds `SolidFill` pattern and sets it on the override |
+| Highlight lookup | Full collector scan + GlobalId computation | `ElementCache` O(1) lookup for highlights, direct `new ElementId(revitId)` for clashes |
+| Issues ignored | `push-clashes` handler skipped `issues` array | Issues handled with purple highlight |
