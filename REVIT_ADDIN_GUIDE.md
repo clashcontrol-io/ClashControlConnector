@@ -1794,3 +1794,340 @@ private static void OnDocumentClosing(object sender, DocumentClosingEventArgs e)
 | Delete 50 elements at once | 50 individual sends | 1 batched deletion |
 | Undo/redo | Full re-export | Diff detects no geometry change → property-only |
 | Rapid typing in schedule | Floods browser | 500ms debounce → 2 updates/second max |
+
+---
+
+## Element Highlight Management
+
+### The Problem
+
+The original guide applies `OverrideGraphicSettings` but never clears them. After a few `highlight` or `push-clashes` calls, the model is covered in stale red/orange overrides with no way to clean up.
+
+### Solution: Track and Clear
+
+Maintain a set of currently highlighted element IDs. Clear them before applying new highlights.
+
+```csharp
+// In App.cs — track highlighted elements
+private static readonly HashSet<ElementId> _highlightedElementIds = new HashSet<ElementId>();
+
+private static void ClearAllHighlights(UIApplication uiApp)
+{
+    var doc = uiApp.ActiveUIDocument?.Document;
+    if (doc == null || _highlightedElementIds.Count == 0) return;
+
+    using (var t = new Transaction(doc, "ClashControl: Clear Highlights"))
+    {
+        t.Start();
+        var view = doc.ActiveView;
+        var defaultOgs = new OverrideGraphicSettings(); // resets to default
+
+        foreach (var eid in _highlightedElementIds)
+        {
+            try { view.SetElementOverrides(eid, defaultOgs); }
+            catch { } // element may have been deleted
+        }
+
+        t.Commit();
+    }
+
+    _highlightedElementIds.Clear();
+}
+
+private static void HighlightElements(UIApplication uiApp, List<string> globalIds)
+{
+    var uidoc = uiApp.ActiveUIDocument;
+    if (uidoc == null) return;
+    var doc = uidoc.Document;
+
+    // Clear previous highlights first
+    ClearAllHighlights(uiApp);
+
+    // Resolve GlobalIds to ElementIds using the cache (O(1) per lookup)
+    var elementIds = new List<ElementId>();
+    foreach (var gid in globalIds)
+    {
+        var eid = _cache.FindByGlobalId(gid);
+        if (eid != null) elementIds.Add(eid);
+    }
+
+    if (elementIds.Count == 0) return;
+
+    // Select elements
+    uidoc.Selection.SetElementIds(elementIds);
+
+    // Color them
+    using (var t = new Transaction(doc, "ClashControl: Highlight"))
+    {
+        t.Start();
+        var view = doc.ActiveView;
+
+        var ogs = new OverrideGraphicSettings();
+        ogs.SetProjectionLineColor(new Color(239, 68, 68));           // red
+        ogs.SetSurfaceForegroundPatternColor(new Color(239, 68, 68));
+
+        // IMPORTANT: Set a solid fill pattern, otherwise the color override
+        // has no visible effect on shaded surfaces
+        var solidFill = new FilteredElementCollector(doc)
+            .OfClass(typeof(FillPatternElement))
+            .Cast<FillPatternElement>()
+            .FirstOrDefault(fp => fp.GetFillPattern().IsSolidFill);
+        if (solidFill != null)
+            ogs.SetSurfaceForegroundPatternId(solidFill.Id);
+
+        ogs.SetSurfaceTransparency(0);
+
+        foreach (var eid in elementIds)
+        {
+            view.SetElementOverrides(eid, ogs);
+            _highlightedElementIds.Add(eid);
+        }
+
+        t.Commit();
+    }
+}
+
+private static void HandlePushClashes(UIApplication uiApp, List<JObject> clashes, List<JObject> issues)
+{
+    var uidoc = uiApp.ActiveUIDocument;
+    if (uidoc == null) return;
+    var doc = uidoc.Document;
+
+    // Clear previous highlights
+    ClearAllHighlights(uiApp);
+
+    // Find the solid fill pattern once
+    var solidFill = new FilteredElementCollector(doc)
+        .OfClass(typeof(FillPatternElement))
+        .Cast<FillPatternElement>()
+        .FirstOrDefault(fp => fp.GetFillPattern().IsSolidFill);
+
+    using (var t = new Transaction(doc, "ClashControl: Mark Clashes"))
+    {
+        t.Start();
+        var view = doc.ActiveView;
+
+        // Hard clash style (red)
+        var hardOgs = new OverrideGraphicSettings();
+        hardOgs.SetProjectionLineColor(new Color(239, 68, 68));
+        hardOgs.SetSurfaceForegroundPatternColor(new Color(239, 68, 68));
+        if (solidFill != null) hardOgs.SetSurfaceForegroundPatternId(solidFill.Id);
+
+        // Clearance clash style (amber)
+        var clearanceOgs = new OverrideGraphicSettings();
+        clearanceOgs.SetProjectionLineColor(new Color(245, 158, 11));
+        clearanceOgs.SetSurfaceForegroundPatternColor(new Color(245, 158, 11));
+        if (solidFill != null) clearanceOgs.SetSurfaceForegroundPatternId(solidFill.Id);
+
+        // Issue style (purple)
+        var issueOgs = new OverrideGraphicSettings();
+        issueOgs.SetProjectionLineColor(new Color(139, 92, 246));
+        issueOgs.SetSurfaceForegroundPatternColor(new Color(139, 92, 246));
+        if (solidFill != null) issueOgs.SetSurfaceForegroundPatternId(solidFill.Id);
+
+        // Apply clash highlights — resolve by revitId directly (no collector scan)
+        foreach (var clash in clashes)
+        {
+            var clashType = clash["type"]?.ToString() ?? "hard";
+            var ogs = clashType == "clearance" ? clearanceOgs : hardOgs;
+
+            void ApplyOverride(JToken elementToken)
+            {
+                var revitId = elementToken?["revitId"]?.ToObject<int?>() ?? 0;
+                if (revitId <= 0) return;
+                var eid = new ElementId(revitId);
+                view.SetElementOverrides(eid, ogs);
+                _highlightedElementIds.Add(eid);
+            }
+
+            ApplyOverride(clash["elementA"]);
+            ApplyOverride(clash["elementB"]);
+        }
+
+        // Apply issue highlights
+        foreach (var issue in issues)
+        {
+            var elementIds = issue["elementIds"]?.ToObject<List<JObject>>() ?? new List<JObject>();
+            foreach (var elRef in elementIds)
+            {
+                var revitId = elRef["revitId"]?.ToObject<int?>() ?? 0;
+                if (revitId <= 0) continue;
+                var eid = new ElementId(revitId);
+                view.SetElementOverrides(eid, issueOgs);
+                _highlightedElementIds.Add(eid);
+            }
+        }
+
+        t.Commit();
+    }
+
+    Debug.WriteLine($"[CC] Highlighted {clashes.Count} clashes + {issues.Count} issues");
+}
+```
+
+### Key Fixes vs Original Guide
+
+| Issue | Original | Fixed |
+|---|---|---|
+| Stale highlights | Never cleared | `ClearAllHighlights()` called before each new highlight |
+| Surface color invisible | No fill pattern set | Finds `SolidFill` pattern and sets it on the override |
+| Highlight lookup | Full collector scan + GlobalId computation | `ElementCache` O(1) lookup for highlights, direct `new ElementId(revitId)` for clashes |
+| Issues ignored | `push-clashes` handler skipped `issues` array | Issues handled with purple highlight |
+
+---
+
+## Error Handling Rules
+
+1. **No document open**: Send `{"type":"error","message":"No document open in Revit"}`
+2. **Element export fails**: Skip the element, log warning via `Debug.WriteLine`, continue with next element. Do NOT abort the entire export.
+3. **WebSocket disconnects mid-export**: Check `SendAsync` return value between batches. If `false`, stop exporting — don't accumulate unsent messages.
+4. **WebSocket disconnects at other times**: Keep the server running. Accept new connections. Do not crash Revit.
+5. **Large models**: Use batched sending (50 elements per `element-batch`). This prevents WebSocket frame size issues and lets ClashControl show progress.
+6. **Thread safety violations**: ALWAYS use `RevitCommandHandler.Enqueue()` for any Revit API call from the WebSocket message handler or debouncer timer. Direct calls from background threads WILL crash Revit.
+7. **Export cancelled**: Send `{"type":"model-error","message":"Export cancelled","elementsSent":N}` so the browser knows to stop waiting.
+8. **Concurrent exports**: Cancel any in-progress export before starting a new one. Only one export should run at a time.
+9. **Document switch during export**: The debouncer's `OnDocumentClosing` handler clears the cache. If an export is in progress, cancel it.
+
+---
+
+## Testing
+
+### Installation
+1. Build the project in Visual Studio (Release mode)
+2. Copy `ClashControlConnector.dll`, `ClashControlConnector.addin`, and `Newtonsoft.Json.dll` to `%APPDATA%\Autodesk\Revit\Addins\2024\` (or your Revit version)
+3. Open Revit — the plugin auto-starts the WebSocket server
+
+### Quick WebSocket Test (without ClashControl)
+Open browser console and run:
+```javascript
+var ws = new WebSocket('ws://localhost:19780');
+ws.onopen = () => { console.log('Connected'); ws.send('{"type":"ping"}'); };
+ws.onmessage = (e) => { console.log(JSON.parse(e.data)); };
+```
+You should see:
+1. `{type: "status", connected: true, documentName: "...", version: "1"}` — immediately on connect
+2. `{type: "pong"}` — in response to your ping
+
+### Full Integration Test with ClashControl
+1. Open a Revit model with some walls, ducts, and pipes
+2. Open ClashControl in a browser
+3. Click the Revit Bridge button (lightning bolt) in the left sidebar
+4. Under "Direct Connection (Live Link)", click **Connect**
+5. Click **Pull Model** — the model should stream into ClashControl with a progress bar
+6. Verify element count and categories match what's in Revit
+7. Run clash detection in ClashControl
+8. Click **Push Clashes** — clashing elements should highlight red/amber in Revit
+9. Click a single clash in ClashControl — the two elements should auto-highlight in Revit
+10. Click a different clash — previous highlight should clear, new one appears
+11. **Live update test**: With ClashControl connected, move a wall in Revit. After ~500ms, the wall should update in the browser.
+12. **Property-only test**: Change a wall's "Mark" parameter. The browser should receive a `properties-only` update (no geometry re-render in the 3D view).
+13. **Cancellation test**: Start an export on a large model, then send `{"type":"cancel-export"}`. Verify the browser receives `model-error` with `elementsSent`.
+
+### Performance Benchmarks to Watch
+- Export of 10k elements should complete in < 30 seconds
+- Debounced live update should arrive at browser within 1 second of edit completion
+- Highlight response should be < 200ms (cache lookup, no collector scan)
+- Memory usage should stay flat after initial export (no leaked geometry data)
+
+---
+
+## Future: Local Clash Detection Server
+
+> **Status**: Research / future version. Not part of v1.
+
+### Motivation
+
+ClashControl currently runs clash detection in the browser using JavaScript. This works, but has limitations:
+
+1. **Single-threaded** — the browser's main thread (or a single Web Worker) processes all element pairs. For large models (50k+ elements), this can take minutes.
+2. **Memory pressure** — holding all geometry in browser memory while also running the 3D viewer competes for the same heap.
+3. **No persistence** — closing the tab loses all clash state. Re-running requires re-importing the model.
+
+### Concept: A Second Localhost Server
+
+Run a lightweight native process alongside the Revit plugin on `localhost:19781`. This server:
+
+- Receives geometry from the Revit plugin (or from ClashControl via WebSocket)
+- Runs clash detection using multi-threaded native code (C++, Rust, or C# with parallel processing)
+- Uses spatial acceleration structures (BVH, octree) for O(n log n) pair testing
+- Returns clash results to ClashControl or directly to the Revit plugin
+
+```
+┌──────────────┐     ┌──────────────────────┐     ┌─────────────────┐
+│   Revit      │────►│  Clash Server :19781  │────►│  Browser        │
+│   + Plugin   │     │  Multi-threaded BVH   │     │  ClashControl   │
+│   :19780     │◄────│  Native performance   │◄────│  (viewer only)  │
+└──────────────┘     └──────────────────────┘     └─────────────────┘
+```
+
+### Architecture Options
+
+#### Option A: Standalone Process (Recommended)
+- A separate `.exe` that the Revit plugin spawns on startup
+- Communicates via WebSocket on `:19781`
+- Can be updated independently of the Revit plugin
+- Can run on its own without Revit (for IFC file clash detection)
+- Could be written in Rust or C++ for maximum performance
+
+#### Option B: In-Process (Inside Revit Plugin)
+- Runs as background threads inside the Revit plugin
+- Simpler deployment (single DLL)
+- But: competes with Revit for CPU and memory, harder to debug, crash risk
+
+#### Option C: WebAssembly Module
+- Ship a WASM module that ClashControl loads in the browser
+- Runs in a Web Worker — doesn't block the UI
+- Near-native performance for computational work
+- But: still single-threaded per worker (can spawn multiple workers for parallelism)
+
+### Potential Process Architecture for Option A
+
+```
+Clash Server Process
+├── WebSocket endpoint (:19781)
+├── Geometry Store
+│   ├── Per-element AABB (axis-aligned bounding box)
+│   ├── Triangle mesh data (for precise intersection)
+│   └── Spatial index (BVH or octree)
+├── Clash Engine
+│   ├── Broad phase: BVH overlap query → candidate pairs
+│   ├── Narrow phase: triangle-triangle intersection (parallel)
+│   ├── Clearance: distance-based with configurable tolerance
+│   └── Duplicate/containment detection
+├── Result Cache
+│   ├── Previous clash results (for diffing)
+│   └── Incremental re-check on model updates
+└── Worker Pool
+    ├── N threads (CPU core count)
+    └── Work-stealing queue for narrow phase
+```
+
+### Key Benefits for ClashControl
+
+1. **Speed** — multi-threaded native BVH can test 50k elements in seconds vs minutes in JS
+2. **Incremental** — when a wall moves, only re-test that wall against its BVH neighbors, not the entire model
+3. **Memory** — geometry lives in the native process, browser only gets clash results (lightweight JSON)
+4. **Persistence** — server can cache model state across browser tab reloads
+5. **Offline** — server could run clash detection as a CI/CD step or batch process
+
+### Protocol Extension
+
+The clash server would speak a superset of the existing protocol:
+
+```json
+{"type":"run-clashes","config":{"tolerance":0.01,"types":["hard","clearance"]}}
+```
+```json
+{"type":"clash-results","clashes":[...],"duration_ms":1234,"pairs_tested":5678900}
+```
+```json
+{"type":"clash-progress","phase":"narrow","percent":45,"pairs_tested":2500000}
+```
+
+### Research Questions
+
+- What spatial index performs best for BIM geometry? (BVH vs octree vs R-tree)
+- Can we use GPU compute (CUDA/Vulkan) for narrow-phase triangle intersection?
+- How to handle curved surfaces (Revit tessellation artifacts vs true geometry)?
+- Should the server support federation (multiple models from different sources)?
+- License implications of shipping a native binary alongside a browser app?
