@@ -2028,3 +2028,106 @@ You should see:
 - Debounced live update should arrive at browser within 1 second of edit completion
 - Highlight response should be < 200ms (cache lookup, no collector scan)
 - Memory usage should stay flat after initial export (no leaked geometry data)
+
+---
+
+## Future: Local Clash Detection Server
+
+> **Status**: Research / future version. Not part of v1.
+
+### Motivation
+
+ClashControl currently runs clash detection in the browser using JavaScript. This works, but has limitations:
+
+1. **Single-threaded** — the browser's main thread (or a single Web Worker) processes all element pairs. For large models (50k+ elements), this can take minutes.
+2. **Memory pressure** — holding all geometry in browser memory while also running the 3D viewer competes for the same heap.
+3. **No persistence** — closing the tab loses all clash state. Re-running requires re-importing the model.
+
+### Concept: A Second Localhost Server
+
+Run a lightweight native process alongside the Revit plugin on `localhost:19781`. This server:
+
+- Receives geometry from the Revit plugin (or from ClashControl via WebSocket)
+- Runs clash detection using multi-threaded native code (C++, Rust, or C# with parallel processing)
+- Uses spatial acceleration structures (BVH, octree) for O(n log n) pair testing
+- Returns clash results to ClashControl or directly to the Revit plugin
+
+```
+┌──────────────┐     ┌──────────────────────┐     ┌─────────────────┐
+│   Revit      │────►│  Clash Server :19781  │────►│  Browser        │
+│   + Plugin   │     │  Multi-threaded BVH   │     │  ClashControl   │
+│   :19780     │◄────│  Native performance   │◄────│  (viewer only)  │
+└──────────────┘     └──────────────────────┘     └─────────────────┘
+```
+
+### Architecture Options
+
+#### Option A: Standalone Process (Recommended)
+- A separate `.exe` that the Revit plugin spawns on startup
+- Communicates via WebSocket on `:19781`
+- Can be updated independently of the Revit plugin
+- Can run on its own without Revit (for IFC file clash detection)
+- Could be written in Rust or C++ for maximum performance
+
+#### Option B: In-Process (Inside Revit Plugin)
+- Runs as background threads inside the Revit plugin
+- Simpler deployment (single DLL)
+- But: competes with Revit for CPU and memory, harder to debug, crash risk
+
+#### Option C: WebAssembly Module
+- Ship a WASM module that ClashControl loads in the browser
+- Runs in a Web Worker — doesn't block the UI
+- Near-native performance for computational work
+- But: still single-threaded per worker (can spawn multiple workers for parallelism)
+
+### Potential Process Architecture for Option A
+
+```
+Clash Server Process
+├── WebSocket endpoint (:19781)
+├── Geometry Store
+│   ├── Per-element AABB (axis-aligned bounding box)
+│   ├── Triangle mesh data (for precise intersection)
+│   └── Spatial index (BVH or octree)
+├── Clash Engine
+│   ├── Broad phase: BVH overlap query → candidate pairs
+│   ├── Narrow phase: triangle-triangle intersection (parallel)
+│   ├── Clearance: distance-based with configurable tolerance
+│   └── Duplicate/containment detection
+├── Result Cache
+│   ├── Previous clash results (for diffing)
+│   └── Incremental re-check on model updates
+└── Worker Pool
+    ├── N threads (CPU core count)
+    └── Work-stealing queue for narrow phase
+```
+
+### Key Benefits for ClashControl
+
+1. **Speed** — multi-threaded native BVH can test 50k elements in seconds vs minutes in JS
+2. **Incremental** — when a wall moves, only re-test that wall against its BVH neighbors, not the entire model
+3. **Memory** — geometry lives in the native process, browser only gets clash results (lightweight JSON)
+4. **Persistence** — server can cache model state across browser tab reloads
+5. **Offline** — server could run clash detection as a CI/CD step or batch process
+
+### Protocol Extension
+
+The clash server would speak a superset of the existing protocol:
+
+```json
+{"type":"run-clashes","config":{"tolerance":0.01,"types":["hard","clearance"]}}
+```
+```json
+{"type":"clash-results","clashes":[...],"duration_ms":1234,"pairs_tested":5678900}
+```
+```json
+{"type":"clash-progress","phase":"narrow","percent":45,"pairs_tested":2500000}
+```
+
+### Research Questions
+
+- What spatial index performs best for BIM geometry? (BVH vs octree vs R-tree)
+- Can we use GPU compute (CUDA/Vulkan) for narrow-phase triangle intersection?
+- How to handle curved surfaces (Revit tessellation artifacts vs true geometry)?
+- Should the server support federation (multiple models from different sources)?
+- License implications of shipping a native binary alongside a browser app?
