@@ -85,7 +85,7 @@ namespace ClashControlConnector.Protocol
             });
         }
 
-        public static string ElementUpdateDeleted(List<string> globalIds, List<int> revitIds)
+        public static string ElementUpdateDeleted(List<string> globalIds, List<long> revitIds)
         {
             return JsonConvert.SerializeObject(new
             {

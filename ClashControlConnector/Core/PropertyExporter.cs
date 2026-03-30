@@ -69,7 +69,7 @@ namespace ClashControlConnector.Core
             var data = new ElementData
             {
                 GlobalId = GlobalIdEncoder.FromElement(element),
-                RevitId = element.Id.IntegerValue,
+                RevitId = element.Id.Value,
                 Name = element.Name ?? "",
                 Category = GetIfcType(element)
             };
@@ -120,11 +120,11 @@ namespace ClashControlConnector.Core
 
         private static string GetParameterGroupName(Parameter param)
         {
-            // ParameterGroup is deprecated in Revit 2024+ but works in 2022-2023.
-            // For broader compatibility, use try/catch around the newer API.
+            // Revit 2025 uses ForgeTypeId-based API (ParameterGroup enum is removed)
             try
             {
-                string groupName = LabelUtils.GetLabelFor(param.Definition.ParameterGroup);
+                var groupTypeId = param.Definition.GetGroupTypeId();
+                string groupName = LabelUtils.GetLabelForGroup(groupTypeId);
                 return string.IsNullOrEmpty(groupName) ? "Other" : groupName;
             }
             catch

@@ -169,7 +169,7 @@ namespace ClashControlConnector
             int batchSize = 50;
             int totalBatches = (int)Math.Ceiling(elements.Count / (double)batchSize);
             if (totalBatches == 0) totalBatches = 1;
-            int expressId = 1;
+            long expressId = 1;
             int elementsSent = 0;
 
             for (int batchIdx = 0; batchIdx < totalBatches; batchIdx++)
@@ -403,7 +403,7 @@ namespace ClashControlConnector
 
         private static bool ApplyOverrideByRevitId(View view, JToken elementToken, OverrideGraphicSettings ogs)
         {
-            var revitId = elementToken?["revitId"]?.ToObject<int?>() ?? 0;
+            var revitId = elementToken?["revitId"]?.ToObject<long?>() ?? 0;
             if (revitId <= 0) return false;
 
             var eid = new ElementId(revitId);
@@ -454,13 +454,13 @@ namespace ClashControlConnector
                 if (deleted.Count > 0)
                 {
                     var deletedGids = new List<string>();
-                    var deletedRevitIds = new List<int>();
+                    var deletedRevitIds = new List<long>();
 
                     foreach (var eid in deleted)
                     {
                         var gid = _cache.FindByElementId(eid);
                         if (gid != null) deletedGids.Add(gid);
-                        deletedRevitIds.Add(eid.IntegerValue);
+                        deletedRevitIds.Add(eid.Value);
                         _cache.Remove(eid);
                     }
 
@@ -613,13 +613,13 @@ namespace ClashControlConnector
         private static bool ShouldExport(Category cat, List<string> filter)
         {
             if (filter.Contains("all"))
-                return ExportCategories.Contains((BuiltInCategory)cat.Id.IntegerValue);
+                return ExportCategories.Contains((BuiltInCategory)cat.Id.Value);
             return filter.Any(f => cat.Name.Equals(f, StringComparison.OrdinalIgnoreCase));
         }
 
         private static bool IsSkippedCategory(Category cat)
         {
-            return SkipCategories.Contains((BuiltInCategory)cat.Id.IntegerValue);
+            return SkipCategories.Contains((BuiltInCategory)cat.Id.Value);
         }
 
         #endregion
