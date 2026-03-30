@@ -1,0 +1,19 @@
+## .NET / Visual Studio
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.cache
+*.nupkg
+
+## Build outputs
+*.dll
+*.pdb
+*.exe
+
+## NuGet
+packages/
+
+## Rider
+.idea/
