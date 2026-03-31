@@ -142,7 +142,7 @@ namespace ClashControlConnector.Core
 
             var bytes = Encoding.UTF8.GetBytes(json);
 
-            await _sendLock.WaitAsync();
+            await _sendLock.WaitAsync().ConfigureAwait(false);
             try
             {
                 int offset = 0;
@@ -154,7 +154,7 @@ namespace ClashControlConnector.Core
                         new ArraySegment<byte>(bytes, offset, chunkSize),
                         WebSocketMessageType.Text,
                         isLast,
-                        CancellationToken.None);
+                        CancellationToken.None).ConfigureAwait(false);
                     offset += chunkSize;
                 }
                 return true;
