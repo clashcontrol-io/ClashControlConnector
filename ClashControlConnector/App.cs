@@ -133,10 +133,23 @@ namespace ClashControlConnector
             _uiApp.ControlledApplication.DocumentOpened += OnDocumentOpened;
             _uiApp.ControlledApplication.DocumentClosing += OnDocumentClosing;
 
+            // Apply refresh interval from settings
+            ApplyRefreshInterval();
+
             _lastKnownConnected = false;
             UpdateButtonStatus(true, false);
             Debug.WriteLine("[CC] Server started on ws://localhost:19780");
             return true;
+        }
+
+        /// <summary>
+        /// Apply the current refresh interval setting to the debouncer.
+        /// Call this when settings change while connected.
+        /// </summary>
+        public static void ApplyRefreshInterval()
+        {
+            _debouncer?.SetInterval(ConnectorSettings.RefreshIntervalSeconds);
+            Debug.WriteLine($"[CC] Refresh interval set to {ConnectorSettings.RefreshIntervalSeconds}s (0 = sync only)");
         }
 
         public static void StopServer()

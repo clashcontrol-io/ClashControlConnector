@@ -1,12 +1,16 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Autodesk.Revit.DB;
 
 namespace ClashControlConnector.Core
 {
     /// <summary>
     /// Accumulates DocumentChanged events into sets of modified/added/deleted ElementIds.
-    /// Changes are only sent when Flush() is called explicitly (e.g., on Synchronize with Central).
+    /// Supports two modes:
+    ///   - Manual flush only (interval = 0): changes sent on Sync with Central
+    ///   - Timed interval: auto-flushes every N seconds when changes exist
+    /// Sync with Central always triggers a flush regardless of mode.
     /// </summary>
     public class ChangeDebouncer : IDisposable
     {
@@ -15,6 +19,7 @@ namespace ClashControlConnector.Core
         private readonly HashSet<ElementId> _deletedIds = new HashSet<ElementId>();
         private readonly object _lock = new object();
         private readonly Action<HashSet<ElementId>, HashSet<ElementId>, HashSet<ElementId>> _onFlush;
+        private Timer _timer;
 
         public ChangeDebouncer(
             Action<HashSet<ElementId>, HashSet<ElementId>, HashSet<ElementId>> onFlush)
@@ -23,7 +28,22 @@ namespace ClashControlConnector.Core
         }
 
         /// <summary>
-        /// Accumulate element changes. Does not trigger a flush — call Flush() explicitly.
+        /// Set the auto-flush interval. 0 = manual only (sync-triggered).
+        /// </summary>
+        public void SetInterval(int seconds)
+        {
+            _timer?.Dispose();
+            _timer = null;
+
+            if (seconds > 0)
+            {
+                int ms = seconds * 1000;
+                _timer = new Timer(TimerFlush, null, ms, ms);
+            }
+        }
+
+        /// <summary>
+        /// Accumulate element changes.
         /// </summary>
         public void Add(ICollection<ElementId> modified, ICollection<ElementId> added, ICollection<ElementId> deleted)
         {
@@ -40,9 +60,6 @@ namespace ClashControlConnector.Core
             }
         }
 
-        /// <summary>
-        /// Returns true if there are any accumulated changes waiting to be flushed.
-        /// </summary>
         public bool HasChanges
         {
             get
@@ -56,7 +73,6 @@ namespace ClashControlConnector.Core
 
         /// <summary>
         /// Flush all accumulated changes to the callback and clear the buffers.
-        /// Call this when the user syncs with central.
         /// </summary>
         public void Flush()
         {
@@ -78,9 +94,14 @@ namespace ClashControlConnector.Core
             _onFlush(modified, added, deleted);
         }
 
+        private void TimerFlush(object state)
+        {
+            if (HasChanges) Flush();
+        }
+
         public void Dispose()
         {
-            // No timer to dispose anymore
+            _timer?.Dispose();
         }
     }
 }
