@@ -5,7 +5,7 @@
     <Assembly>ClashControlConnector.dll</Assembly>
     <FullClassName>ClashControlConnector.App</FullClassName>
     <AddInId>C1A5C0D1-CC01-4F7A-B2E3-901234567890</AddInId>
-    <VendorId>ClashControl</VendorId>
-    <VendorDescription>ClashControl — Free IFC Clash Detection</VendorDescription>
+    <VendorId>ThomHoffer</VendorId>
+    <VendorDescription>Thom Hoffer</VendorDescription>
   </AddIn>
 </RevitAddIns>
