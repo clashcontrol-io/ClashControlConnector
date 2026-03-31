@@ -26,31 +26,29 @@ namespace ClashControlConnector
         private static ChangeDebouncer _debouncer;
         private static CancellationTokenSource _exportCts;
         private static readonly HashSet<ElementId> _highlightedElementIds = new HashSet<ElementId>();
+        private static PushButton _ribbonButton;
+        private static bool _lastKnownConnected;
+        private static UIControlledApplication _uiApp;
 
         public static WsServer Server => _server;
         public static ElementCache Cache => _cache;
+        public static bool IsServerRunning => _server != null;
 
         #region Startup / Shutdown
 
         public Result OnStartup(UIControlledApplication application)
         {
+            _uiApp = application;
+
             // Register ExternalEvent for thread marshalling
             _commandHandler = new RevitCommandHandler();
             _externalEvent = ExternalEvent.Create(_commandHandler);
             RevitCommandHandler.Event = _externalEvent;
 
-            // Initialize debouncer (500ms window)
-            _debouncer = new ChangeDebouncer(500, ProcessDebouncedChanges);
+            // Initialize change accumulator (flushes on sync with central)
+            _debouncer = new ChangeDebouncer(ProcessDebouncedChanges);
 
-            // Start WebSocket server
-            _server = new WsServer(19780);
-            _server.OnMessage += HandleMessage;
-            _server.Start();
-
-            // Listen for document events
-            application.ControlledApplication.DocumentChanged += OnDocumentChanged;
-            application.ControlledApplication.DocumentOpened += OnDocumentOpened;
-            application.ControlledApplication.DocumentClosing += OnDocumentClosing;
+            // Do NOT start the server automatically — user must click the button
 
             // Create ribbon tab & button
             try
@@ -64,25 +62,109 @@ namespace ClashControlConnector
                     Assembly.GetExecutingAssembly().Location,
                     typeof(ToggleCommand).FullName);
 
-                buttonData.ToolTip = "Toggle ClashControl live connection (ws://localhost:19780)";
-                panel.AddItem(buttonData);
+                buttonData.ToolTip = "Click to start ClashControl connector (ws://localhost:19780)";
+                _ribbonButton = panel.AddItem(buttonData) as PushButton;
+                UpdateButtonStatus(false, false);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"[CC] Ribbon error: {ex.Message}");
             }
 
+            // Poll connection status to update ribbon button
+            application.Idling += OnIdling;
+
             return Result.Succeeded;
+        }
+
+        private static void OnIdling(object sender, Autodesk.Revit.UI.Events.IdlingEventArgs e)
+        {
+            bool running = _server != null;
+            bool connected = _server?.IsClientConnected ?? false;
+            if (connected != _lastKnownConnected)
+            {
+                _lastKnownConnected = connected;
+                UpdateButtonStatus(running, connected);
+            }
+        }
+
+        private static void UpdateButtonStatus(bool running, bool connected)
+        {
+            if (_ribbonButton == null) return;
+
+            if (!running)
+            {
+                _ribbonButton.ItemText = "ClashControl\n○ Off";
+                _ribbonButton.ToolTip = "Click to start ClashControl connector.";
+            }
+            else if (connected)
+            {
+                _ribbonButton.ItemText = "ClashControl\n● Connected";
+                _ribbonButton.ToolTip = "ClashControl is connected on ws://localhost:19780\nClick to manage connection.";
+            }
+            else
+            {
+                _ribbonButton.ItemText = "ClashControl\n◌ Listening";
+                _ribbonButton.ToolTip = "Waiting for ClashControl to connect on ws://localhost:19780\nOpen ClashControl in your browser and click 'Connect to Revit'.";
+            }
+        }
+
+        /// <summary>
+        /// Start the WebSocket server. Returns true on success.
+        /// </summary>
+        public static bool StartServer()
+        {
+            if (_server != null) return true;
+
+            var server = new WsServer(19780);
+            server.OnMessage += HandleMessage;
+
+            if (!server.Start())
+            {
+                server.Dispose();
+                return false;
+            }
+
+            _server = server;
+
+            // Register document events
+            _uiApp.ControlledApplication.DocumentChanged += OnDocumentChanged;
+            _uiApp.ControlledApplication.DocumentSynchronizedWithCentral += OnDocumentSynced;
+            _uiApp.ControlledApplication.DocumentOpened += OnDocumentOpened;
+            _uiApp.ControlledApplication.DocumentClosing += OnDocumentClosing;
+
+            _lastKnownConnected = false;
+            UpdateButtonStatus(true, false);
+            Debug.WriteLine("[CC] Server started on ws://localhost:19780");
+            return true;
+        }
+
+        public static void StopServer()
+        {
+            if (_server == null) return;
+
+            // Unregister document events
+            _uiApp.ControlledApplication.DocumentChanged -= OnDocumentChanged;
+            _uiApp.ControlledApplication.DocumentSynchronizedWithCentral -= OnDocumentSynced;
+            _uiApp.ControlledApplication.DocumentOpened -= OnDocumentOpened;
+            _uiApp.ControlledApplication.DocumentClosing -= OnDocumentClosing;
+
+            _exportCts?.Cancel();
+            _server.Stop();
+            _server = null;
+            _cache.Clear();
+            _highlightedElementIds.Clear();
+
+            _lastKnownConnected = false;
+            UpdateButtonStatus(false, false);
+            Debug.WriteLine("[CC] Server stopped");
         }
 
         public Result OnShutdown(UIControlledApplication application)
         {
-            application.ControlledApplication.DocumentChanged -= OnDocumentChanged;
-            application.ControlledApplication.DocumentOpened -= OnDocumentOpened;
-            application.ControlledApplication.DocumentClosing -= OnDocumentClosing;
-            _exportCts?.Cancel();
+            application.Idling -= OnIdling;
+            StopServer(); // safely stops and unregisters events if running
             _debouncer?.Dispose();
-            _server?.Stop();
             return Result.Succeeded;
         }
 
@@ -104,8 +186,7 @@ namespace ClashControlConnector
                         break;
 
                     case "export":
-                        var categories = msg["categories"]?.ToObject<List<string>>() ?? new List<string> { "all" };
-                        RevitCommandHandler.Enqueue(app => ExportModel(app, categories));
+                        RevitCommandHandler.Enqueue(app => ExportModel(app));
                         break;
 
                     case "cancel-export":
@@ -138,7 +219,7 @@ namespace ClashControlConnector
 
         #region Export
 
-        private static void ExportModel(UIApplication uiApp, List<string> categoryFilter)
+        private static void ExportModel(UIApplication uiApp)
         {
             var doc = uiApp.ActiveUIDocument?.Document;
             if (doc == null)
@@ -155,13 +236,48 @@ namespace ClashControlConnector
             // Clear cache for fresh export
             _cache.Clear();
 
-            // Collect elements
+            // Build allowed categories from user settings
+            var allowed = GetAllowedCategories();
+
+            // Collect elements from host document
             var elements = new FilteredElementCollector(doc)
                 .WhereElementIsNotElementType()
                 .WhereElementIsViewIndependent()
-                .Where(e => e.Category != null && ShouldExport(e.Category, categoryFilter))
+                .Where(e => e.Category != null && ShouldExport(e.Category, allowed))
                 .Where(e => !IsSkippedCategory(e.Category))
                 .ToList();
+
+            // Collect elements from linked Revit models if enabled
+            if (ConnectorSettings.IncludeLinkedModels)
+            {
+                var linkInstances = new FilteredElementCollector(doc)
+                    .OfClass(typeof(RevitLinkInstance))
+                    .Cast<RevitLinkInstance>()
+                    .ToList();
+
+                foreach (var linkInst in linkInstances)
+                {
+                    var linkDoc = linkInst.GetLinkDocument();
+                    if (linkDoc == null) continue;
+
+                    try
+                    {
+                        var linkElements = new FilteredElementCollector(linkDoc)
+                            .WhereElementIsNotElementType()
+                            .WhereElementIsViewIndependent()
+                            .Where(e => e.Category != null && ShouldExport(e.Category, allowed))
+                            .Where(e => !IsSkippedCategory(e.Category))
+                            .ToList();
+
+                        elements.AddRange(linkElements);
+                        Debug.WriteLine($"[CC] Linked model '{linkDoc.Title}': {linkElements.Count} elements");
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[CC] Error reading linked model: {ex.Message}");
+                    }
+                }
+            }
 
             // Send model-start
             _ = _server.SendAsync(Messages.ModelStart(doc.Title + ".rvt", elements.Count));
@@ -189,12 +305,14 @@ namespace ClashControlConnector
                     try
                     {
                         var el = elements[j];
-                        var data = PropertyExporter.ExtractProperties(el, doc);
+                        // Use element's own document (handles linked model elements)
+                        var elDoc = el.Document ?? doc;
+                        var data = PropertyExporter.ExtractProperties(el, elDoc);
                         data.ExpressId = expressId++;
                         data.Geometry = GeometryExporter.ExtractGeometry(el);
                         if (data.Geometry == null)
                             data.Geometry = new ElementGeometry();
-                        data.Geometry.Color = GetElementColor(el, doc);
+                        data.Geometry.Color = GetElementColor(el, elDoc);
 
                         // Populate cache
                         int geomHash = (data.Geometry.Positions ?? "").GetHashCode();
@@ -208,9 +326,15 @@ namespace ClashControlConnector
                     }
                 }
 
-                // Send batch — stop if client disconnected
-                var sent = _server.SendAsync(Messages.ElementBatch(batchIdx, totalBatches, batch)).Result;
-                if (!sent)
+                // Send batch — stop if client disconnected or send times out
+                var sendTask = _server.SendAsync(Messages.ElementBatch(batchIdx, totalBatches, batch));
+                if (!sendTask.Wait(TimeSpan.FromSeconds(10)))
+                {
+                    Debug.WriteLine("[CC] Send timed out during export, aborting");
+                    _ = _server.SendAsync(Messages.ModelError("Send timed out", elementsSent));
+                    return;
+                }
+                if (!sendTask.Result)
                 {
                     Debug.WriteLine("[CC] Client disconnected during export, aborting");
                     return;
@@ -429,17 +553,27 @@ namespace ClashControlConnector
 
         #endregion
 
-        #region Live Updates (Debounced)
+        #region Live Updates (Sync-Triggered)
 
         private static void OnDocumentChanged(object sender, DocumentChangedEventArgs e)
         {
             if (!_server.IsClientConnected) return;
 
+            // Only accumulate — changes are flushed when user syncs with central
             _debouncer.Add(
                 e.GetModifiedElementIds(),
                 e.GetAddedElementIds(),
                 e.GetDeletedElementIds()
             );
+        }
+
+        private static void OnDocumentSynced(object sender, DocumentSynchronizedWithCentralEventArgs e)
+        {
+            if (!_server.IsClientConnected) return;
+            if (!_debouncer.HasChanges) return;
+
+            Debug.WriteLine("[CC] Sync with Central detected — flushing accumulated changes");
+            _debouncer.Flush();
         }
 
         private static void ProcessDebouncedChanges(
@@ -469,32 +603,28 @@ namespace ClashControlConnector
 
                 // Handle added + modified
                 var fullUpdateElements = new List<Element>();
-                var propertyOnlyElements = new List<Element>();
+                var allowed = GetAllowedCategories();
 
                 foreach (var eid in added)
                 {
                     var el = doc.GetElement(eid);
                     if (el?.Category == null || IsSkippedCategory(el.Category)) continue;
+                    if (!ShouldExport(el.Category, allowed)) continue;
                     fullUpdateElements.Add(el);
                 }
 
                 foreach (var eid in modified)
                 {
+                    // Only process elements we've already exported (in cache)
+                    // This skips internal Revit elements, types, views, etc.
+                    if (_cache.FindByElementId(eid) == null) continue;
+
                     var el = doc.GetElement(eid);
                     if (el?.Category == null || IsSkippedCategory(el.Category)) continue;
 
-                    var geom = GeometryExporter.ExtractGeometry(el);
-                    int newHash = (geom?.Positions ?? "").GetHashCode();
-
-                    if (_cache.HasGeometryChanged(eid, newHash))
-                    {
-                        fullUpdateElements.Add(el);
-                        _cache.UpdateGeometryHash(eid, newHash);
-                    }
-                    else
-                    {
-                        propertyOnlyElements.Add(el);
-                    }
+                    // Always send as full update — the geometry extraction
+                    // only happens once below, not twice for diffing
+                    fullUpdateElements.Add(el);
                 }
 
                 // Send full updates (geometry + properties)
@@ -522,22 +652,6 @@ namespace ClashControlConnector
                         _ = _server.SendAsync(Messages.ElementUpdateModified(batch));
                 }
 
-                // Send property-only updates (no geometry)
-                if (propertyOnlyElements.Count > 0)
-                {
-                    var propBatch = new List<ElementData>();
-                    foreach (var el in propertyOnlyElements)
-                    {
-                        try
-                        {
-                            propBatch.Add(PropertyExporter.ExtractProperties(el, doc));
-                        }
-                        catch { }
-                    }
-
-                    if (propBatch.Count > 0)
-                        _ = _server.SendAsync(Messages.ElementUpdatePropertiesOnly(propBatch));
-                }
             });
         }
 
@@ -560,43 +674,47 @@ namespace ClashControlConnector
 
         #region Category Filters
 
-        private static readonly HashSet<BuiltInCategory> ExportCategories = new HashSet<BuiltInCategory>
+        /// <summary>
+        /// Maps friendly category names (from settings UI) to BuiltInCategory enums.
+        /// </summary>
+        private static readonly Dictionary<string, BuiltInCategory> CategoryNameMap =
+            new Dictionary<string, BuiltInCategory>(StringComparer.OrdinalIgnoreCase)
         {
-            BuiltInCategory.OST_Walls,
-            BuiltInCategory.OST_Floors,
-            BuiltInCategory.OST_Roofs,
-            BuiltInCategory.OST_Ceilings,
-            BuiltInCategory.OST_Doors,
-            BuiltInCategory.OST_Windows,
-            BuiltInCategory.OST_Columns,
-            BuiltInCategory.OST_StructuralColumns,
-            BuiltInCategory.OST_StructuralFraming,
-            BuiltInCategory.OST_StructuralFoundation,
-            BuiltInCategory.OST_Stairs,
-            BuiltInCategory.OST_StairsRailing,
-            BuiltInCategory.OST_Ramps,
-            BuiltInCategory.OST_CurtainWallPanels,
-            BuiltInCategory.OST_CurtainWallMullions,
-            BuiltInCategory.OST_GenericModel,
-            BuiltInCategory.OST_DuctCurves,
-            BuiltInCategory.OST_PipeCurves,
-            BuiltInCategory.OST_FlexDuctCurves,
-            BuiltInCategory.OST_FlexPipeCurves,
-            BuiltInCategory.OST_DuctFitting,
-            BuiltInCategory.OST_PipeFitting,
-            BuiltInCategory.OST_DuctAccessory,
-            BuiltInCategory.OST_PipeAccessory,
-            BuiltInCategory.OST_MechanicalEquipment,
-            BuiltInCategory.OST_PlumbingFixtures,
-            BuiltInCategory.OST_ElectricalEquipment,
-            BuiltInCategory.OST_ElectricalFixtures,
-            BuiltInCategory.OST_CableTray,
-            BuiltInCategory.OST_Conduit,
-            BuiltInCategory.OST_LightingFixtures,
-            BuiltInCategory.OST_FireAlarmDevices,
-            BuiltInCategory.OST_Sprinklers,
-            BuiltInCategory.OST_Furniture,
-            BuiltInCategory.OST_FurnitureSystems,
+            ["Walls"] = BuiltInCategory.OST_Walls,
+            ["Floors"] = BuiltInCategory.OST_Floors,
+            ["Roofs"] = BuiltInCategory.OST_Roofs,
+            ["Ceilings"] = BuiltInCategory.OST_Ceilings,
+            ["Doors"] = BuiltInCategory.OST_Doors,
+            ["Windows"] = BuiltInCategory.OST_Windows,
+            ["Columns"] = BuiltInCategory.OST_Columns,
+            ["Structural Columns"] = BuiltInCategory.OST_StructuralColumns,
+            ["Structural Framing"] = BuiltInCategory.OST_StructuralFraming,
+            ["Structural Foundations"] = BuiltInCategory.OST_StructuralFoundation,
+            ["Stairs"] = BuiltInCategory.OST_Stairs,
+            ["Railings"] = BuiltInCategory.OST_StairsRailing,
+            ["Ramps"] = BuiltInCategory.OST_Ramps,
+            ["Curtain Panels"] = BuiltInCategory.OST_CurtainWallPanels,
+            ["Curtain Wall Mullions"] = BuiltInCategory.OST_CurtainWallMullions,
+            ["Generic Models"] = BuiltInCategory.OST_GenericModel,
+            ["Ducts"] = BuiltInCategory.OST_DuctCurves,
+            ["Pipes"] = BuiltInCategory.OST_PipeCurves,
+            ["Flex Ducts"] = BuiltInCategory.OST_FlexDuctCurves,
+            ["Flex Pipes"] = BuiltInCategory.OST_FlexPipeCurves,
+            ["Duct Fittings"] = BuiltInCategory.OST_DuctFitting,
+            ["Pipe Fittings"] = BuiltInCategory.OST_PipeFitting,
+            ["Duct Accessories"] = BuiltInCategory.OST_DuctAccessory,
+            ["Pipe Accessories"] = BuiltInCategory.OST_PipeAccessory,
+            ["Mechanical Equipment"] = BuiltInCategory.OST_MechanicalEquipment,
+            ["Plumbing Fixtures"] = BuiltInCategory.OST_PlumbingFixtures,
+            ["Electrical Equipment"] = BuiltInCategory.OST_ElectricalEquipment,
+            ["Electrical Fixtures"] = BuiltInCategory.OST_ElectricalFixtures,
+            ["Cable Trays"] = BuiltInCategory.OST_CableTray,
+            ["Conduits"] = BuiltInCategory.OST_Conduit,
+            ["Lighting Fixtures"] = BuiltInCategory.OST_LightingFixtures,
+            ["Fire Alarm Devices"] = BuiltInCategory.OST_FireAlarmDevices,
+            ["Sprinklers"] = BuiltInCategory.OST_Sprinklers,
+            ["Furniture"] = BuiltInCategory.OST_Furniture,
+            ["Furniture Systems"] = BuiltInCategory.OST_FurnitureSystems,
         };
 
         private static readonly HashSet<BuiltInCategory> SkipCategories = new HashSet<BuiltInCategory>
@@ -605,16 +723,34 @@ namespace ClashControlConnector
             BuiltInCategory.OST_Areas,
             BuiltInCategory.OST_Grids,
             BuiltInCategory.OST_Levels,
-            BuiltInCategory.OST_ReferencePlanes,
             BuiltInCategory.OST_DetailComponents,
             BuiltInCategory.OST_Lines,
         };
 
-        private static bool ShouldExport(Category cat, List<string> filter)
+        /// <summary>
+        /// Build the set of allowed BuiltInCategories from ConnectorSettings.
+        /// </summary>
+        private static HashSet<BuiltInCategory> GetAllowedCategories()
         {
-            if (filter.Contains("all"))
-                return ExportCategories.Contains((BuiltInCategory)cat.Id.Value);
-            return filter.Any(f => cat.Name.Equals(f, StringComparison.OrdinalIgnoreCase));
+            var selected = ConnectorSettings.SelectedCategories;
+            if (selected == null || selected.Count == 0)
+            {
+                // No selection = export all known categories
+                return new HashSet<BuiltInCategory>(CategoryNameMap.Values);
+            }
+
+            var allowed = new HashSet<BuiltInCategory>();
+            foreach (var name in selected)
+            {
+                if (CategoryNameMap.TryGetValue(name, out var bic))
+                    allowed.Add(bic);
+            }
+            return allowed;
+        }
+
+        private static bool ShouldExport(Category cat, HashSet<BuiltInCategory> allowed)
+        {
+            return allowed.Contains((BuiltInCategory)cat.Id.Value);
         }
 
         private static bool IsSkippedCategory(Category cat)

@@ -141,6 +141,30 @@ This separation makes it trivial to decide whether a GPU buffer rebuild is neede
 
 ---
 
+## 12. Project Scoping — Revit vs IFC Separation
+
+### Problem
+A ClashControl project should be either IFC-based or Revit-linked, never both at the same time. If a user has an IFC model loaded in a project and then connects to Revit, the Revit data would merge into the same element store, creating duplicate geometry, conflicting IDs, and meaningless clash results. This is confusing and produces garbage output.
+
+### Why this must be the default
+Users shouldn't have to think about this. The moment they connect Revit to a project, that project should be a Revit project. If they want to import an IFC file, that's a separate project. Mixing sources silently is the worst outcome — it looks like it works but produces wrong clash results that undermine trust in the tool.
+
+### What to do
+
+**On connect/export**: ClashControl should send a `projectId` in the `export` request. The Revit plugin includes this `projectId` in all responses (`element-batch`, `model-end`, `element-update`). This lets ClashControl route data to the correct project if multiple are open.
+
+**On project creation**: When creating a new project, ClashControl should let the user choose the source type:
+- **IFC Import** — upload `.ifc` files, no live connection
+- **Revit Live Link** — connects to the Revit plugin, live updates, no IFC import allowed
+
+**Enforce exclusivity**: A Revit-linked project should disable the IFC import button and show a clear message: "This project is connected to Revit. Import IFC into a different project." The reverse should also apply — an IFC project should disable the Revit connect button.
+
+**Switching sources**: If a user wants to switch a project from IFC to Revit (or vice versa), they should explicitly clear the current model first. This prevents accidental data mixing.
+
+**Visual indicator**: Show the source type prominently in the project header — "Source: Revit 2025 (Live)" or "Source: IFC Import" — so it's always clear what's driving the model.
+
+---
+
 ## Summary of New Message Types to Support
 
 | Direction | Type | Action |
@@ -153,3 +177,4 @@ This separation makes it trivial to decide whether a GPU buffer rebuild is neede
 | Plugin → Browser | `push-clashes-ack` | **NEW** — confirms clash highlighting |
 | Browser → Plugin | `cancel-export` | **NEW** — abort running export |
 | Browser → Plugin | `clear-highlights` | **NEW** — remove all Revit overrides |
+| Browser → Plugin | `export` | Should include `projectId` for routing |
