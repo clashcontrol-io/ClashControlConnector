@@ -41,8 +41,8 @@ namespace ClashControlConnector
             _externalEvent = ExternalEvent.Create(_commandHandler);
             RevitCommandHandler.Event = _externalEvent;
 
-            // Initialize debouncer (500ms window)
-            _debouncer = new ChangeDebouncer(1500, ProcessDebouncedChanges);
+            // Initialize change accumulator (flushes on sync with central)
+            _debouncer = new ChangeDebouncer(ProcessDebouncedChanges);
 
             // Start WebSocket server
             _server = new WsServer(19780);
@@ -51,6 +51,7 @@ namespace ClashControlConnector
 
             // Listen for document events
             application.ControlledApplication.DocumentChanged += OnDocumentChanged;
+            application.ControlledApplication.DocumentSynchronizedWithCentral += OnDocumentSynced;
             application.ControlledApplication.DocumentOpened += OnDocumentOpened;
             application.ControlledApplication.DocumentClosing += OnDocumentClosing;
 
@@ -111,6 +112,7 @@ namespace ClashControlConnector
         {
             application.Idling -= OnIdling;
             application.ControlledApplication.DocumentChanged -= OnDocumentChanged;
+            application.ControlledApplication.DocumentSynchronizedWithCentral -= OnDocumentSynced;
             application.ControlledApplication.DocumentOpened -= OnDocumentOpened;
             application.ControlledApplication.DocumentClosing -= OnDocumentClosing;
             _exportCts?.Cancel();
@@ -468,17 +470,27 @@ namespace ClashControlConnector
 
         #endregion
 
-        #region Live Updates (Debounced)
+        #region Live Updates (Sync-Triggered)
 
         private static void OnDocumentChanged(object sender, DocumentChangedEventArgs e)
         {
             if (!_server.IsClientConnected) return;
 
+            // Only accumulate — changes are flushed when user syncs with central
             _debouncer.Add(
                 e.GetModifiedElementIds(),
                 e.GetAddedElementIds(),
                 e.GetDeletedElementIds()
             );
+        }
+
+        private static void OnDocumentSynced(object sender, DocumentSynchronizedWithCentralEventArgs e)
+        {
+            if (!_server.IsClientConnected) return;
+            if (!_debouncer.HasChanges) return;
+
+            Debug.WriteLine("[CC] Sync with Central detected — flushing accumulated changes");
+            _debouncer.Flush();
         }
 
         private static void ProcessDebouncedChanges(
