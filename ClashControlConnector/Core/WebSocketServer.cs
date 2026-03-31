@@ -31,14 +31,30 @@ namespace ClashControlConnector.Core
             _port = port;
         }
 
-        public void Start()
+        /// <summary>
+        /// Start the WebSocket server. Returns true on success, false if port is in use.
+        /// </summary>
+        public bool Start()
         {
             _cts = new CancellationTokenSource();
             _listener = new HttpListener();
             _listener.Prefixes.Add($"http://localhost:{_port}/");
-            _listener.Start();
+            try
+            {
+                _listener.Start();
+            }
+            catch (HttpListenerException ex)
+            {
+                Debug.WriteLine($"[CC] Failed to start server: {ex.Message}");
+                _listener.Close();
+                _listener = null;
+                _cts.Dispose();
+                _cts = null;
+                return false;
+            }
             Task.Run(() => AcceptLoop(_cts.Token));
             Debug.WriteLine($"[CC] WebSocket server started on ws://localhost:{_port}");
+            return true;
         }
 
         private async Task AcceptLoop(CancellationToken ct)

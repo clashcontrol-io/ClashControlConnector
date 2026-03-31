@@ -50,7 +50,13 @@ namespace ClashControlConnector.Commands
 
                 if (result == TaskDialogResult.CommandLink1)
                 {
-                    App.StartServer();
+                    if (!App.StartServer())
+                    {
+                        TaskDialog.Show("ClashControl",
+                            "Could not start the connector.\n\n" +
+                            "Port 19780 is already in use — this usually means a previous Revit session " +
+                            "didn't shut down cleanly. Close all Revit instances, wait a few seconds, and try again.");
+                    }
                 }
             }
 

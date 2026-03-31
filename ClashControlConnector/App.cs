@@ -109,13 +109,23 @@ namespace ClashControlConnector
             }
         }
 
-        public static void StartServer()
+        /// <summary>
+        /// Start the WebSocket server. Returns true on success.
+        /// </summary>
+        public static bool StartServer()
         {
-            if (_server != null) return;
+            if (_server != null) return true;
 
-            _server = new WsServer(19780);
-            _server.OnMessage += HandleMessage;
-            _server.Start();
+            var server = new WsServer(19780);
+            server.OnMessage += HandleMessage;
+
+            if (!server.Start())
+            {
+                server.Dispose();
+                return false;
+            }
+
+            _server = server;
 
             // Register document events
             _uiApp.ControlledApplication.DocumentChanged += OnDocumentChanged;
@@ -126,6 +136,7 @@ namespace ClashControlConnector
             _lastKnownConnected = false;
             UpdateButtonStatus(true, false);
             Debug.WriteLine("[CC] Server started on ws://localhost:19780");
+            return true;
         }
 
         public static void StopServer()
