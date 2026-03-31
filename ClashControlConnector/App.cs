@@ -605,7 +605,6 @@ namespace ClashControlConnector
             BuiltInCategory.OST_Areas,
             BuiltInCategory.OST_Grids,
             BuiltInCategory.OST_Levels,
-            BuiltInCategory.OST_ReferencePlanes,
             BuiltInCategory.OST_DetailComponents,
             BuiltInCategory.OST_Lines,
         };
