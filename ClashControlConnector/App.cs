@@ -42,7 +42,7 @@ namespace ClashControlConnector
             RevitCommandHandler.Event = _externalEvent;
 
             // Initialize debouncer (500ms window)
-            _debouncer = new ChangeDebouncer(500, ProcessDebouncedChanges);
+            _debouncer = new ChangeDebouncer(1500, ProcessDebouncedChanges);
 
             // Start WebSocket server
             _server = new WsServer(19780);
@@ -519,21 +519,16 @@ namespace ClashControlConnector
 
                 foreach (var eid in modified)
                 {
+                    // Only process elements we've already exported (in cache)
+                    // This skips internal Revit elements, types, views, etc.
+                    if (_cache.FindByElementId(eid) == null) continue;
+
                     var el = doc.GetElement(eid);
                     if (el?.Category == null || IsSkippedCategory(el.Category)) continue;
 
-                    var geom = GeometryExporter.ExtractGeometry(el);
-                    int newHash = (geom?.Positions ?? "").GetHashCode();
-
-                    if (_cache.HasGeometryChanged(eid, newHash))
-                    {
-                        fullUpdateElements.Add(el);
-                        _cache.UpdateGeometryHash(eid, newHash);
-                    }
-                    else
-                    {
-                        propertyOnlyElements.Add(el);
-                    }
+                    // Always send as full update — the geometry extraction
+                    // only happens once below, not twice for diffing
+                    fullUpdateElements.Add(el);
                 }
 
                 // Send full updates (geometry + properties)
@@ -561,22 +556,6 @@ namespace ClashControlConnector
                         _ = _server.SendAsync(Messages.ElementUpdateModified(batch));
                 }
 
-                // Send property-only updates (no geometry)
-                if (propertyOnlyElements.Count > 0)
-                {
-                    var propBatch = new List<ElementData>();
-                    foreach (var el in propertyOnlyElements)
-                    {
-                        try
-                        {
-                            propBatch.Add(PropertyExporter.ExtractProperties(el, doc));
-                        }
-                        catch { }
-                    }
-
-                    if (propBatch.Count > 0)
-                        _ = _server.SendAsync(Messages.ElementUpdatePropertiesOnly(propBatch));
-                }
             });
         }
 
