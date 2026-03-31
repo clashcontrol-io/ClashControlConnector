@@ -208,9 +208,15 @@ namespace ClashControlConnector
                     }
                 }
 
-                // Send batch — stop if client disconnected
-                var sent = _server.SendAsync(Messages.ElementBatch(batchIdx, totalBatches, batch)).Result;
-                if (!sent)
+                // Send batch — stop if client disconnected or send times out
+                var sendTask = _server.SendAsync(Messages.ElementBatch(batchIdx, totalBatches, batch));
+                if (!sendTask.Wait(TimeSpan.FromSeconds(10)))
+                {
+                    Debug.WriteLine("[CC] Send timed out during export, aborting");
+                    _ = _server.SendAsync(Messages.ModelError("Send timed out", elementsSent));
+                    return;
+                }
+                if (!sendTask.Result)
                 {
                     Debug.WriteLine("[CC] Client disconnected during export, aborting");
                     return;
