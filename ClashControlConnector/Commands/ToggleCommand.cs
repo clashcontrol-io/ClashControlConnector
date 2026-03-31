@@ -1,6 +1,8 @@
 using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
+using ClashControlConnector.Core;
+using ClashControlConnector.UI;
 
 namespace ClashControlConnector.Commands
 {
@@ -22,7 +24,9 @@ namespace ClashControlConnector.Commands
 
                 dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink1, "Disconnect",
                     "Stop the connector and close the WebSocket server.");
-                dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink2, "Keep running",
+                dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink2, "Settings",
+                    "Change category filters and linked model settings.");
+                dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink3, "Keep running",
                     "Leave the connector active.");
 
                 var result = dialog.Show();
@@ -31,36 +35,46 @@ namespace ClashControlConnector.Commands
                 {
                     App.StopServer();
                 }
+                else if (result == TaskDialogResult.CommandLink2)
+                {
+                    ShowSettingsForm();
+                }
             }
             else
             {
-                // Server is not running — offer to start it
-                var dialog = new TaskDialog("ClashControl");
-                dialog.MainInstruction = "Start ClashControl Connector?";
-                dialog.MainContent =
-                    "This will open a WebSocket server on ws://localhost:19780.\n" +
-                    "Then open ClashControl in your browser and click 'Connect to Revit'.";
-
-                dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink1, "Connect",
-                    "Start the connector and begin listening for ClashControl.");
-                dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink2, "Cancel",
-                    "Do nothing.");
-
-                var result = dialog.Show();
-
-                if (result == TaskDialogResult.CommandLink1)
+                // Server is not running — show settings form to configure and connect
+                using (var form = new ConnectorSettingsForm())
                 {
-                    if (!App.StartServer())
+                    if (form.ShowDialog() == System.Windows.Forms.DialogResult.OK)
                     {
-                        TaskDialog.Show("ClashControl",
-                            "Could not start the connector.\n\n" +
-                            "Port 19780 is already in use — this usually means a previous Revit session " +
-                            "didn't shut down cleanly. Close all Revit instances, wait a few seconds, and try again.");
+                        // Apply settings
+                        ConnectorSettings.SelectedCategories = form.SelectedCategories;
+                        ConnectorSettings.IncludeLinkedModels = form.IncludeLinkedModels;
+
+                        if (!App.StartServer())
+                        {
+                            TaskDialog.Show("ClashControl",
+                                "Could not start the connector.\n\n" +
+                                "Port 19780 is already in use — this usually means a previous Revit session " +
+                                "didn't shut down cleanly. Close all Revit instances, wait a few seconds, and try again.");
+                        }
                     }
                 }
             }
 
             return Result.Succeeded;
+        }
+
+        private static void ShowSettingsForm()
+        {
+            using (var form = new ConnectorSettingsForm())
+            {
+                if (form.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                {
+                    ConnectorSettings.SelectedCategories = form.SelectedCategories;
+                    ConnectorSettings.IncludeLinkedModels = form.IncludeLinkedModels;
+                }
+            }
         }
     }
 }

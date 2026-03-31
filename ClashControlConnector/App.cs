@@ -186,8 +186,7 @@ namespace ClashControlConnector
                         break;
 
                     case "export":
-                        var categories = msg["categories"]?.ToObject<List<string>>() ?? new List<string> { "all" };
-                        RevitCommandHandler.Enqueue(app => ExportModel(app, categories));
+                        RevitCommandHandler.Enqueue(app => ExportModel(app));
                         break;
 
                     case "cancel-export":
@@ -220,7 +219,7 @@ namespace ClashControlConnector
 
         #region Export
 
-        private static void ExportModel(UIApplication uiApp, List<string> categoryFilter)
+        private static void ExportModel(UIApplication uiApp)
         {
             var doc = uiApp.ActiveUIDocument?.Document;
             if (doc == null)
@@ -237,13 +236,48 @@ namespace ClashControlConnector
             // Clear cache for fresh export
             _cache.Clear();
 
-            // Collect elements
+            // Build allowed categories from user settings
+            var allowed = GetAllowedCategories();
+
+            // Collect elements from host document
             var elements = new FilteredElementCollector(doc)
                 .WhereElementIsNotElementType()
                 .WhereElementIsViewIndependent()
-                .Where(e => e.Category != null && ShouldExport(e.Category, categoryFilter))
+                .Where(e => e.Category != null && ShouldExport(e.Category, allowed))
                 .Where(e => !IsSkippedCategory(e.Category))
                 .ToList();
+
+            // Collect elements from linked Revit models if enabled
+            if (ConnectorSettings.IncludeLinkedModels)
+            {
+                var linkInstances = new FilteredElementCollector(doc)
+                    .OfClass(typeof(RevitLinkInstance))
+                    .Cast<RevitLinkInstance>()
+                    .ToList();
+
+                foreach (var linkInst in linkInstances)
+                {
+                    var linkDoc = linkInst.GetLinkDocument();
+                    if (linkDoc == null) continue;
+
+                    try
+                    {
+                        var linkElements = new FilteredElementCollector(linkDoc)
+                            .WhereElementIsNotElementType()
+                            .WhereElementIsViewIndependent()
+                            .Where(e => e.Category != null && ShouldExport(e.Category, allowed))
+                            .Where(e => !IsSkippedCategory(e.Category))
+                            .ToList();
+
+                        elements.AddRange(linkElements);
+                        Debug.WriteLine($"[CC] Linked model '{linkDoc.Title}': {linkElements.Count} elements");
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[CC] Error reading linked model: {ex.Message}");
+                    }
+                }
+            }
 
             // Send model-start
             _ = _server.SendAsync(Messages.ModelStart(doc.Title + ".rvt", elements.Count));
@@ -271,12 +305,14 @@ namespace ClashControlConnector
                     try
                     {
                         var el = elements[j];
-                        var data = PropertyExporter.ExtractProperties(el, doc);
+                        // Use element's own document (handles linked model elements)
+                        var elDoc = el.Document ?? doc;
+                        var data = PropertyExporter.ExtractProperties(el, elDoc);
                         data.ExpressId = expressId++;
                         data.Geometry = GeometryExporter.ExtractGeometry(el);
                         if (data.Geometry == null)
                             data.Geometry = new ElementGeometry();
-                        data.Geometry.Color = GetElementColor(el, doc);
+                        data.Geometry.Color = GetElementColor(el, elDoc);
 
                         // Populate cache
                         int geomHash = (data.Geometry.Positions ?? "").GetHashCode();
@@ -567,12 +603,13 @@ namespace ClashControlConnector
 
                 // Handle added + modified
                 var fullUpdateElements = new List<Element>();
-                var propertyOnlyElements = new List<Element>();
+                var allowed = GetAllowedCategories();
 
                 foreach (var eid in added)
                 {
                     var el = doc.GetElement(eid);
                     if (el?.Category == null || IsSkippedCategory(el.Category)) continue;
+                    if (!ShouldExport(el.Category, allowed)) continue;
                     fullUpdateElements.Add(el);
                 }
 
@@ -637,43 +674,47 @@ namespace ClashControlConnector
 
         #region Category Filters
 
-        private static readonly HashSet<BuiltInCategory> ExportCategories = new HashSet<BuiltInCategory>
+        /// <summary>
+        /// Maps friendly category names (from settings UI) to BuiltInCategory enums.
+        /// </summary>
+        private static readonly Dictionary<string, BuiltInCategory> CategoryNameMap =
+            new Dictionary<string, BuiltInCategory>(StringComparer.OrdinalIgnoreCase)
         {
-            BuiltInCategory.OST_Walls,
-            BuiltInCategory.OST_Floors,
-            BuiltInCategory.OST_Roofs,
-            BuiltInCategory.OST_Ceilings,
-            BuiltInCategory.OST_Doors,
-            BuiltInCategory.OST_Windows,
-            BuiltInCategory.OST_Columns,
-            BuiltInCategory.OST_StructuralColumns,
-            BuiltInCategory.OST_StructuralFraming,
-            BuiltInCategory.OST_StructuralFoundation,
-            BuiltInCategory.OST_Stairs,
-            BuiltInCategory.OST_StairsRailing,
-            BuiltInCategory.OST_Ramps,
-            BuiltInCategory.OST_CurtainWallPanels,
-            BuiltInCategory.OST_CurtainWallMullions,
-            BuiltInCategory.OST_GenericModel,
-            BuiltInCategory.OST_DuctCurves,
-            BuiltInCategory.OST_PipeCurves,
-            BuiltInCategory.OST_FlexDuctCurves,
-            BuiltInCategory.OST_FlexPipeCurves,
-            BuiltInCategory.OST_DuctFitting,
-            BuiltInCategory.OST_PipeFitting,
-            BuiltInCategory.OST_DuctAccessory,
-            BuiltInCategory.OST_PipeAccessory,
-            BuiltInCategory.OST_MechanicalEquipment,
-            BuiltInCategory.OST_PlumbingFixtures,
-            BuiltInCategory.OST_ElectricalEquipment,
-            BuiltInCategory.OST_ElectricalFixtures,
-            BuiltInCategory.OST_CableTray,
-            BuiltInCategory.OST_Conduit,
-            BuiltInCategory.OST_LightingFixtures,
-            BuiltInCategory.OST_FireAlarmDevices,
-            BuiltInCategory.OST_Sprinklers,
-            BuiltInCategory.OST_Furniture,
-            BuiltInCategory.OST_FurnitureSystems,
+            ["Walls"] = BuiltInCategory.OST_Walls,
+            ["Floors"] = BuiltInCategory.OST_Floors,
+            ["Roofs"] = BuiltInCategory.OST_Roofs,
+            ["Ceilings"] = BuiltInCategory.OST_Ceilings,
+            ["Doors"] = BuiltInCategory.OST_Doors,
+            ["Windows"] = BuiltInCategory.OST_Windows,
+            ["Columns"] = BuiltInCategory.OST_Columns,
+            ["Structural Columns"] = BuiltInCategory.OST_StructuralColumns,
+            ["Structural Framing"] = BuiltInCategory.OST_StructuralFraming,
+            ["Structural Foundations"] = BuiltInCategory.OST_StructuralFoundation,
+            ["Stairs"] = BuiltInCategory.OST_Stairs,
+            ["Railings"] = BuiltInCategory.OST_StairsRailing,
+            ["Ramps"] = BuiltInCategory.OST_Ramps,
+            ["Curtain Panels"] = BuiltInCategory.OST_CurtainWallPanels,
+            ["Curtain Wall Mullions"] = BuiltInCategory.OST_CurtainWallMullions,
+            ["Generic Models"] = BuiltInCategory.OST_GenericModel,
+            ["Ducts"] = BuiltInCategory.OST_DuctCurves,
+            ["Pipes"] = BuiltInCategory.OST_PipeCurves,
+            ["Flex Ducts"] = BuiltInCategory.OST_FlexDuctCurves,
+            ["Flex Pipes"] = BuiltInCategory.OST_FlexPipeCurves,
+            ["Duct Fittings"] = BuiltInCategory.OST_DuctFitting,
+            ["Pipe Fittings"] = BuiltInCategory.OST_PipeFitting,
+            ["Duct Accessories"] = BuiltInCategory.OST_DuctAccessory,
+            ["Pipe Accessories"] = BuiltInCategory.OST_PipeAccessory,
+            ["Mechanical Equipment"] = BuiltInCategory.OST_MechanicalEquipment,
+            ["Plumbing Fixtures"] = BuiltInCategory.OST_PlumbingFixtures,
+            ["Electrical Equipment"] = BuiltInCategory.OST_ElectricalEquipment,
+            ["Electrical Fixtures"] = BuiltInCategory.OST_ElectricalFixtures,
+            ["Cable Trays"] = BuiltInCategory.OST_CableTray,
+            ["Conduits"] = BuiltInCategory.OST_Conduit,
+            ["Lighting Fixtures"] = BuiltInCategory.OST_LightingFixtures,
+            ["Fire Alarm Devices"] = BuiltInCategory.OST_FireAlarmDevices,
+            ["Sprinklers"] = BuiltInCategory.OST_Sprinklers,
+            ["Furniture"] = BuiltInCategory.OST_Furniture,
+            ["Furniture Systems"] = BuiltInCategory.OST_FurnitureSystems,
         };
 
         private static readonly HashSet<BuiltInCategory> SkipCategories = new HashSet<BuiltInCategory>
@@ -686,11 +727,30 @@ namespace ClashControlConnector
             BuiltInCategory.OST_Lines,
         };
 
-        private static bool ShouldExport(Category cat, List<string> filter)
+        /// <summary>
+        /// Build the set of allowed BuiltInCategories from ConnectorSettings.
+        /// </summary>
+        private static HashSet<BuiltInCategory> GetAllowedCategories()
         {
-            if (filter.Contains("all"))
-                return ExportCategories.Contains((BuiltInCategory)cat.Id.Value);
-            return filter.Any(f => cat.Name.Equals(f, StringComparison.OrdinalIgnoreCase));
+            var selected = ConnectorSettings.SelectedCategories;
+            if (selected == null || selected.Count == 0)
+            {
+                // No selection = export all known categories
+                return new HashSet<BuiltInCategory>(CategoryNameMap.Values);
+            }
+
+            var allowed = new HashSet<BuiltInCategory>();
+            foreach (var name in selected)
+            {
+                if (CategoryNameMap.TryGetValue(name, out var bic))
+                    allowed.Add(bic);
+            }
+            return allowed;
+        }
+
+        private static bool ShouldExport(Category cat, HashSet<BuiltInCategory> allowed)
+        {
+            return allowed.Contains((BuiltInCategory)cat.Id.Value);
         }
 
         private static bool IsSkippedCategory(Category cat)
