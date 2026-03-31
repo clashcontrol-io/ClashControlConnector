@@ -28,14 +28,18 @@ namespace ClashControlConnector
         private static readonly HashSet<ElementId> _highlightedElementIds = new HashSet<ElementId>();
         private static PushButton _ribbonButton;
         private static bool _lastKnownConnected;
+        private static UIControlledApplication _uiApp;
 
         public static WsServer Server => _server;
         public static ElementCache Cache => _cache;
+        public static bool IsServerRunning => _server != null;
 
         #region Startup / Shutdown
 
         public Result OnStartup(UIControlledApplication application)
         {
+            _uiApp = application;
+
             // Register ExternalEvent for thread marshalling
             _commandHandler = new RevitCommandHandler();
             _externalEvent = ExternalEvent.Create(_commandHandler);
@@ -44,16 +48,7 @@ namespace ClashControlConnector
             // Initialize change accumulator (flushes on sync with central)
             _debouncer = new ChangeDebouncer(ProcessDebouncedChanges);
 
-            // Start WebSocket server
-            _server = new WsServer(19780);
-            _server.OnMessage += HandleMessage;
-            _server.Start();
-
-            // Listen for document events
-            application.ControlledApplication.DocumentChanged += OnDocumentChanged;
-            application.ControlledApplication.DocumentSynchronizedWithCentral += OnDocumentSynced;
-            application.ControlledApplication.DocumentOpened += OnDocumentOpened;
-            application.ControlledApplication.DocumentClosing += OnDocumentClosing;
+            // Do NOT start the server automatically — user must click the button
 
             // Create ribbon tab & button
             try
@@ -67,9 +62,9 @@ namespace ClashControlConnector
                     Assembly.GetExecutingAssembly().Location,
                     typeof(ToggleCommand).FullName);
 
-                buttonData.ToolTip = "Toggle ClashControl live connection (ws://localhost:19780)";
+                buttonData.ToolTip = "Click to start ClashControl connector (ws://localhost:19780)";
                 _ribbonButton = panel.AddItem(buttonData) as PushButton;
-                UpdateButtonStatus(false);
+                UpdateButtonStatus(false, false);
             }
             catch (Exception ex)
             {
@@ -84,40 +79,81 @@ namespace ClashControlConnector
 
         private static void OnIdling(object sender, Autodesk.Revit.UI.Events.IdlingEventArgs e)
         {
+            bool running = _server != null;
             bool connected = _server?.IsClientConnected ?? false;
             if (connected != _lastKnownConnected)
             {
                 _lastKnownConnected = connected;
-                UpdateButtonStatus(connected);
+                UpdateButtonStatus(running, connected);
             }
         }
 
-        private static void UpdateButtonStatus(bool connected)
+        private static void UpdateButtonStatus(bool running, bool connected)
         {
             if (_ribbonButton == null) return;
 
-            if (connected)
+            if (!running)
+            {
+                _ribbonButton.ItemText = "ClashControl\n○ Off";
+                _ribbonButton.ToolTip = "Click to start ClashControl connector.";
+            }
+            else if (connected)
             {
                 _ribbonButton.ItemText = "ClashControl\n● Connected";
-                _ribbonButton.ToolTip = "ClashControl is connected on ws://localhost:19780\nClick for details.";
+                _ribbonButton.ToolTip = "ClashControl is connected on ws://localhost:19780\nClick to manage connection.";
             }
             else
             {
-                _ribbonButton.ItemText = "ClashControl\n○ Waiting";
+                _ribbonButton.ItemText = "ClashControl\n◌ Listening";
                 _ribbonButton.ToolTip = "Waiting for ClashControl to connect on ws://localhost:19780\nOpen ClashControl in your browser and click 'Connect to Revit'.";
             }
+        }
+
+        public static void StartServer()
+        {
+            if (_server != null) return;
+
+            _server = new WsServer(19780);
+            _server.OnMessage += HandleMessage;
+            _server.Start();
+
+            // Register document events
+            _uiApp.ControlledApplication.DocumentChanged += OnDocumentChanged;
+            _uiApp.ControlledApplication.DocumentSynchronizedWithCentral += OnDocumentSynced;
+            _uiApp.ControlledApplication.DocumentOpened += OnDocumentOpened;
+            _uiApp.ControlledApplication.DocumentClosing += OnDocumentClosing;
+
+            _lastKnownConnected = false;
+            UpdateButtonStatus(true, false);
+            Debug.WriteLine("[CC] Server started on ws://localhost:19780");
+        }
+
+        public static void StopServer()
+        {
+            if (_server == null) return;
+
+            // Unregister document events
+            _uiApp.ControlledApplication.DocumentChanged -= OnDocumentChanged;
+            _uiApp.ControlledApplication.DocumentSynchronizedWithCentral -= OnDocumentSynced;
+            _uiApp.ControlledApplication.DocumentOpened -= OnDocumentOpened;
+            _uiApp.ControlledApplication.DocumentClosing -= OnDocumentClosing;
+
+            _exportCts?.Cancel();
+            _server.Stop();
+            _server = null;
+            _cache.Clear();
+            _highlightedElementIds.Clear();
+
+            _lastKnownConnected = false;
+            UpdateButtonStatus(false, false);
+            Debug.WriteLine("[CC] Server stopped");
         }
 
         public Result OnShutdown(UIControlledApplication application)
         {
             application.Idling -= OnIdling;
-            application.ControlledApplication.DocumentChanged -= OnDocumentChanged;
-            application.ControlledApplication.DocumentSynchronizedWithCentral -= OnDocumentSynced;
-            application.ControlledApplication.DocumentOpened -= OnDocumentOpened;
-            application.ControlledApplication.DocumentClosing -= OnDocumentClosing;
-            _exportCts?.Cancel();
+            StopServer(); // safely stops and unregisters events if running
             _debouncer?.Dispose();
-            _server?.Stop();
             return Result.Succeeded;
         }
 
