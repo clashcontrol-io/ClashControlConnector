@@ -197,6 +197,7 @@ namespace ClashControlConnector.Core
         {
             "https://clashcontrol.io",
             "https://www.clashcontrol.io",
+            "https://clashcontrol-io.github.io",
             "http://localhost:3000",
             "http://localhost:5173",
             "http://127.0.0.1:3000",
