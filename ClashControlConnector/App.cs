@@ -26,6 +26,8 @@ namespace ClashControlConnector
         private static ChangeDebouncer _debouncer;
         private static CancellationTokenSource _exportCts;
         private static readonly HashSet<ElementId> _highlightedElementIds = new HashSet<ElementId>();
+        private static PushButton _ribbonButton;
+        private static bool _lastKnownConnected;
 
         public static WsServer Server => _server;
         public static ElementCache Cache => _cache;
@@ -65,18 +67,49 @@ namespace ClashControlConnector
                     typeof(ToggleCommand).FullName);
 
                 buttonData.ToolTip = "Toggle ClashControl live connection (ws://localhost:19780)";
-                panel.AddItem(buttonData);
+                _ribbonButton = panel.AddItem(buttonData) as PushButton;
+                UpdateButtonStatus(false);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"[CC] Ribbon error: {ex.Message}");
             }
 
+            // Poll connection status to update ribbon button
+            application.Idling += OnIdling;
+
             return Result.Succeeded;
+        }
+
+        private static void OnIdling(object sender, Autodesk.Revit.UI.Events.IdlingEventArgs e)
+        {
+            bool connected = _server?.IsClientConnected ?? false;
+            if (connected != _lastKnownConnected)
+            {
+                _lastKnownConnected = connected;
+                UpdateButtonStatus(connected);
+            }
+        }
+
+        private static void UpdateButtonStatus(bool connected)
+        {
+            if (_ribbonButton == null) return;
+
+            if (connected)
+            {
+                _ribbonButton.ItemText = "ClashControl\n● Connected";
+                _ribbonButton.ToolTip = "ClashControl is connected on ws://localhost:19780\nClick for details.";
+            }
+            else
+            {
+                _ribbonButton.ItemText = "ClashControl\n○ Waiting";
+                _ribbonButton.ToolTip = "Waiting for ClashControl to connect on ws://localhost:19780\nOpen ClashControl in your browser and click 'Connect to Revit'.";
+            }
         }
 
         public Result OnShutdown(UIControlledApplication application)
         {
+            application.Idling -= OnIdling;
             application.ControlledApplication.DocumentChanged -= OnDocumentChanged;
             application.ControlledApplication.DocumentOpened -= OnDocumentOpened;
             application.ControlledApplication.DocumentClosing -= OnDocumentClosing;
