@@ -48,8 +48,7 @@ namespace ClashControlConnector.Commands
                     if (form.ShowDialog() == System.Windows.Forms.DialogResult.OK)
                     {
                         // Apply settings
-                        ConnectorSettings.SelectedCategories = form.SelectedCategories;
-                        ConnectorSettings.IncludeLinkedModels = form.IncludeLinkedModels;
+                        ApplySettings(form);
 
                         if (!App.StartServer())
                         {
@@ -71,10 +70,17 @@ namespace ClashControlConnector.Commands
             {
                 if (form.ShowDialog() == System.Windows.Forms.DialogResult.OK)
                 {
-                    ConnectorSettings.SelectedCategories = form.SelectedCategories;
-                    ConnectorSettings.IncludeLinkedModels = form.IncludeLinkedModels;
+                    ApplySettings(form);
+                    App.ApplyRefreshInterval();
                 }
             }
+        }
+
+        private static void ApplySettings(ConnectorSettingsForm form)
+        {
+            ConnectorSettings.SelectedCategories = form.SelectedCategories;
+            ConnectorSettings.IncludeLinkedModels = form.IncludeLinkedModels;
+            ConnectorSettings.RefreshIntervalSeconds = form.RefreshIntervalSeconds;
         }
     }
 }
