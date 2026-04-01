@@ -20,6 +20,7 @@ namespace ClashControlConnector.Core
         private readonly object _lock = new object();
         private readonly Action<HashSet<ElementId>, HashSet<ElementId>, HashSet<ElementId>> _onFlush;
         private Timer _timer;
+        private int _flushing;
 
         public ChangeDebouncer(
             Action<HashSet<ElementId>, HashSet<ElementId>, HashSet<ElementId>> onFlush)
@@ -73,25 +74,49 @@ namespace ClashControlConnector.Core
 
         /// <summary>
         /// Flush all accumulated changes to the callback and clear the buffers.
+        /// Guard prevents concurrent flushes from timer and sync events.
         /// </summary>
         public void Flush()
         {
-            HashSet<ElementId> modified, added, deleted;
+            if (Interlocked.CompareExchange(ref _flushing, 1, 0) != 0)
+                return;
+
+            try
+            {
+                HashSet<ElementId> modified, added, deleted;
+                lock (_lock)
+                {
+                    if (_modifiedIds.Count == 0 && _addedIds.Count == 0 && _deletedIds.Count == 0)
+                        return;
+
+                    modified = new HashSet<ElementId>(_modifiedIds);
+                    added = new HashSet<ElementId>(_addedIds);
+                    deleted = new HashSet<ElementId>(_deletedIds);
+
+                    _modifiedIds.Clear();
+                    _addedIds.Clear();
+                    _deletedIds.Clear();
+                }
+
+                _onFlush(modified, added, deleted);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _flushing, 0);
+            }
+        }
+
+        /// <summary>
+        /// Discard all accumulated changes without flushing.
+        /// </summary>
+        public void Clear()
+        {
             lock (_lock)
             {
-                if (_modifiedIds.Count == 0 && _addedIds.Count == 0 && _deletedIds.Count == 0)
-                    return;
-
-                modified = new HashSet<ElementId>(_modifiedIds);
-                added = new HashSet<ElementId>(_addedIds);
-                deleted = new HashSet<ElementId>(_deletedIds);
-
                 _modifiedIds.Clear();
                 _addedIds.Clear();
                 _deletedIds.Clear();
             }
-
-            _onFlush(modified, added, deleted);
         }
 
         private void TimerFlush(object state)

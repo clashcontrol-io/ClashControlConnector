@@ -13,7 +13,6 @@ namespace ClashControlConnector.Commands
         {
             if (App.IsServerRunning)
             {
-                // Server is running — offer to stop it
                 var dialog = new TaskDialog("ClashControl");
                 dialog.MainInstruction = "ClashControl Connector is active";
 
@@ -42,12 +41,10 @@ namespace ClashControlConnector.Commands
             }
             else
             {
-                // Server is not running — show settings form to configure and connect
                 using (var form = new ConnectorSettingsForm())
                 {
                     if (form.ShowDialog() == System.Windows.Forms.DialogResult.OK)
                     {
-                        // Apply settings
                         ApplySettings(form);
 
                         if (!App.StartServer())
@@ -81,6 +78,7 @@ namespace ClashControlConnector.Commands
             ConnectorSettings.SelectedCategories = form.SelectedCategories;
             ConnectorSettings.IncludeLinkedModels = form.IncludeLinkedModels;
             ConnectorSettings.RefreshIntervalSeconds = form.RefreshIntervalSeconds;
+            App.InvalidateAllowedCategories();
         }
     }
 }
