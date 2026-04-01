@@ -30,48 +30,24 @@ namespace ClashControlConnector.UI
             ("Every 5 minutes", 300),
         };
 
-        private static readonly (string Name, string Label, bool DefaultOn)[] Categories = new[]
+        private static readonly string[] Categories = new[]
         {
             // Architectural
-            ("Walls", "Walls", true),
-            ("Floors", "Floors", true),
-            ("Roofs", "Roofs", true),
-            ("Ceilings", "Ceilings", true),
-            ("Doors", "Doors", true),
-            ("Windows", "Windows", true),
-            ("Stairs", "Stairs", true),
-            ("Railings", "Railings", true),
-            ("Ramps", "Ramps", true),
-            ("Curtain Panels", "Curtain Panels", true),
-            ("Curtain Wall Mullions", "Curtain Wall Mullions", true),
-            ("Generic Models", "Generic Models", true),
-            ("Furniture", "Furniture", true),
-            ("Furniture Systems", "Furniture Systems", true),
-
+            "Walls", "Floors", "Roofs", "Ceilings",
+            "Doors", "Windows", "Stairs", "Railings", "Ramps",
+            "Curtain Panels", "Curtain Wall Mullions",
+            "Generic Models", "Furniture", "Furniture Systems",
             // Structural
-            ("Columns", "Columns", true),
-            ("Structural Columns", "Structural Columns", true),
-            ("Structural Framing", "Structural Framing", true),
-            ("Structural Foundations", "Structural Foundations", true),
-
+            "Columns", "Structural Columns",
+            "Structural Framing", "Structural Foundations",
             // MEP
-            ("Ducts", "Ducts", true),
-            ("Pipes", "Pipes", true),
-            ("Flex Ducts", "Flex Ducts", true),
-            ("Flex Pipes", "Flex Pipes", true),
-            ("Duct Fittings", "Duct Fittings", true),
-            ("Pipe Fittings", "Pipe Fittings", true),
-            ("Duct Accessories", "Duct Accessories", true),
-            ("Pipe Accessories", "Pipe Accessories", true),
-            ("Mechanical Equipment", "Mechanical Equipment", true),
-            ("Plumbing Fixtures", "Plumbing Fixtures", true),
-            ("Electrical Equipment", "Electrical Equipment", true),
-            ("Electrical Fixtures", "Electrical Fixtures", true),
-            ("Cable Trays", "Cable Trays", true),
-            ("Conduits", "Conduits", true),
-            ("Lighting Fixtures", "Lighting Fixtures", true),
-            ("Fire Alarm Devices", "Fire Alarm Devices", true),
-            ("Sprinklers", "Sprinklers", true),
+            "Ducts", "Pipes", "Flex Ducts", "Flex Pipes",
+            "Duct Fittings", "Pipe Fittings",
+            "Duct Accessories", "Pipe Accessories",
+            "Mechanical Equipment", "Plumbing Fixtures",
+            "Electrical Equipment", "Electrical Fixtures",
+            "Cable Trays", "Conduits", "Lighting Fixtures",
+            "Fire Alarm Devices", "Sprinklers",
         };
 
         // Persist selections across sessions within the same Revit instance
@@ -179,31 +155,25 @@ namespace ClashControlConnector.UI
                 _connectButton, _cancelButton
             });
 
-            // Populate categories
             foreach (var cat in Categories)
-            {
-                _categoryList.Items.Add(cat.Label);
-            }
+                _categoryList.Items.Add(cat);
         }
 
         private void LoadDefaults()
         {
             if (_lastSelectedCategories != null)
             {
-                // Restore previous session selections
                 for (int i = 0; i < Categories.Length; i++)
                 {
-                    _categoryList.SetItemChecked(i, _lastSelectedCategories.Contains(Categories[i].Name));
+                    _categoryList.SetItemChecked(i, _lastSelectedCategories.Contains(Categories[i]));
                 }
                 _includeLinkedModels.Checked = _lastIncludeLinked;
 
-                // Restore refresh interval
                 int idx = Array.FindIndex(RefreshOptions, o => o.Seconds == _lastRefreshInterval);
                 _refreshInterval.SelectedIndex = idx >= 0 ? idx : 0;
             }
             else
             {
-                // First time — check all by default, sync-only refresh
                 SetAll(true);
                 _refreshInterval.SelectedIndex = 0;
             }
@@ -223,12 +193,11 @@ namespace ClashControlConnector.UI
                 for (int i = 0; i < Categories.Length; i++)
                 {
                     if (_categoryList.GetItemChecked(i))
-                        SelectedCategories.Add(Categories[i].Name);
+                        SelectedCategories.Add(Categories[i]);
                 }
                 IncludeLinkedModels = _includeLinkedModels.Checked;
                 RefreshIntervalSeconds = RefreshOptions[_refreshInterval.SelectedIndex].Seconds;
 
-                // Persist for next time
                 _lastSelectedCategories = new HashSet<string>(SelectedCategories);
                 _lastIncludeLinked = IncludeLinkedModels;
                 _lastRefreshInterval = RefreshIntervalSeconds;

@@ -29,6 +29,7 @@ namespace ClashControlConnector
         private static PushButton _ribbonButton;
         private static bool _lastKnownConnected;
         private static UIControlledApplication _uiApp;
+        private static HashSet<BuiltInCategory> _allowedCategories;
 
         public static WsServer Server => _server;
         public static ElementCache Cache => _cache;
@@ -133,7 +134,6 @@ namespace ClashControlConnector
             _uiApp.ControlledApplication.DocumentOpened += OnDocumentOpened;
             _uiApp.ControlledApplication.DocumentClosing += OnDocumentClosing;
 
-            // Apply refresh interval from settings
             ApplyRefreshInterval();
 
             _lastKnownConnected = false;
@@ -167,6 +167,8 @@ namespace ClashControlConnector
             _server = null;
             _cache.Clear();
             _highlightedElementIds.Clear();
+            _debouncer?.Clear();
+            _allowedCategories = null;
 
             _lastKnownConnected = false;
             UpdateButtonStatus(false, false);
@@ -249,18 +251,9 @@ namespace ClashControlConnector
             // Clear cache for fresh export
             _cache.Clear();
 
-            // Build allowed categories from user settings
             var allowed = GetAllowedCategories();
+            var elements = CollectExportableElements(doc, allowed);
 
-            // Collect elements from host document
-            var elements = new FilteredElementCollector(doc)
-                .WhereElementIsNotElementType()
-                .WhereElementIsViewIndependent()
-                .Where(e => e.Category != null && ShouldExport(e.Category, allowed))
-                .Where(e => !IsSkippedCategory(e.Category))
-                .ToList();
-
-            // Collect elements from linked Revit models if enabled
             if (ConnectorSettings.IncludeLinkedModels)
             {
                 var linkInstances = new FilteredElementCollector(doc)
@@ -275,13 +268,7 @@ namespace ClashControlConnector
 
                     try
                     {
-                        var linkElements = new FilteredElementCollector(linkDoc)
-                            .WhereElementIsNotElementType()
-                            .WhereElementIsViewIndependent()
-                            .Where(e => e.Category != null && ShouldExport(e.Category, allowed))
-                            .Where(e => !IsSkippedCategory(e.Category))
-                            .ToList();
-
+                        var linkElements = CollectExportableElements(linkDoc, allowed);
                         elements.AddRange(linkElements);
                         Debug.WriteLine($"[CC] Linked model '{linkDoc.Title}': {linkElements.Count} elements");
                     }
@@ -339,7 +326,6 @@ namespace ClashControlConnector
                     }
                 }
 
-                // Send batch — stop if client disconnected or send times out
                 var sendTask = _server.SendAsync(Messages.ElementBatch(batchIdx, totalBatches, batch));
                 if (!sendTask.Wait(TimeSpan.FromSeconds(10)))
                 {
@@ -572,7 +558,6 @@ namespace ClashControlConnector
         {
             if (!_server.IsClientConnected) return;
 
-            // Only accumulate — changes are flushed when user syncs with central
             _debouncer.Add(
                 e.GetModifiedElementIds(),
                 e.GetAddedElementIds(),
@@ -614,7 +599,6 @@ namespace ClashControlConnector
                     _ = _server.SendAsync(Messages.ElementUpdateDeleted(deletedGids, deletedRevitIds));
                 }
 
-                // Handle added + modified
                 var fullUpdateElements = new List<Element>();
                 var allowed = GetAllowedCategories();
 
@@ -628,19 +612,15 @@ namespace ClashControlConnector
 
                 foreach (var eid in modified)
                 {
-                    // Only process elements we've already exported (in cache)
-                    // This skips internal Revit elements, types, views, etc.
+                    // Skip elements not in cache (internal Revit types, views, etc.)
                     if (_cache.FindByElementId(eid) == null) continue;
 
                     var el = doc.GetElement(eid);
                     if (el?.Category == null || IsSkippedCategory(el.Category)) continue;
 
-                    // Always send as full update — the geometry extraction
-                    // only happens once below, not twice for diffing
                     fullUpdateElements.Add(el);
                 }
 
-                // Send full updates (geometry + properties)
                 if (fullUpdateElements.Count > 0)
                 {
                     var batch = new List<ElementData>();
@@ -686,6 +666,16 @@ namespace ClashControlConnector
         #endregion
 
         #region Category Filters
+
+        private static List<Element> CollectExportableElements(Document doc, HashSet<BuiltInCategory> allowed)
+        {
+            return new FilteredElementCollector(doc)
+                .WhereElementIsNotElementType()
+                .WhereElementIsViewIndependent()
+                .Where(e => e.Category != null && ShouldExport(e.Category, allowed))
+                .Where(e => !IsSkippedCategory(e.Category))
+                .ToList();
+        }
 
         /// <summary>
         /// Maps friendly category names (from settings UI) to BuiltInCategory enums.
@@ -741,24 +731,33 @@ namespace ClashControlConnector
         };
 
         /// <summary>
-        /// Build the set of allowed BuiltInCategories from ConnectorSettings.
+        /// Invalidate cached allowed categories (call when settings change).
         /// </summary>
+        public static void InvalidateAllowedCategories()
+        {
+            _allowedCategories = null;
+        }
+
         private static HashSet<BuiltInCategory> GetAllowedCategories()
         {
+            if (_allowedCategories != null) return _allowedCategories;
+
             var selected = ConnectorSettings.SelectedCategories;
             if (selected == null || selected.Count == 0)
             {
-                // No selection = export all known categories
-                return new HashSet<BuiltInCategory>(CategoryNameMap.Values);
+                _allowedCategories = new HashSet<BuiltInCategory>(CategoryNameMap.Values);
             }
-
-            var allowed = new HashSet<BuiltInCategory>();
-            foreach (var name in selected)
+            else
             {
-                if (CategoryNameMap.TryGetValue(name, out var bic))
-                    allowed.Add(bic);
+                var allowed = new HashSet<BuiltInCategory>();
+                foreach (var name in selected)
+                {
+                    if (CategoryNameMap.TryGetValue(name, out var bic))
+                        allowed.Add(bic);
+                }
+                _allowedCategories = allowed;
             }
-            return allowed;
+            return _allowedCategories;
         }
 
         private static bool ShouldExport(Category cat, HashSet<BuiltInCategory> allowed)
