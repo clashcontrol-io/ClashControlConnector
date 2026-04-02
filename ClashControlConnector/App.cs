@@ -27,12 +27,15 @@ namespace ClashControlConnector
         private static ElementCache _cache = new ElementCache();
         private static ChangeDebouncer _debouncer;
         private static CancellationTokenSource _exportCts;
+        private static string _activeProjectId;
         private static readonly HashSet<ElementId> _highlightedElementIds = new HashSet<ElementId>();
         private static PushButton _ribbonButton;
         private static bool _lastKnownConnected;
         private static UIControlledApplication _uiApp;
         private static HashSet<BuiltInCategory> _allowedCategories;
         private static HashSet<ElementId> _lastSelection = new HashSet<ElementId>();
+        private static double[] _lastCameraEye;
+        private static DateTime _lastCameraSendTime = DateTime.MinValue;
 
         public static WsServer Server => _server;
         public static ElementCache Cache => _cache;
@@ -108,6 +111,34 @@ namespace ClashControlConnector
                             if (gid != null) globalIds.Add(gid);
                         }
                         _ = _server.SendAsync(Messages.SelectionChanged(globalIds));
+                    }
+                }
+            }
+
+            // Camera sync: send Revit camera to browser (throttled to max 5/sec)
+            if (connected && ConnectorSettings.SyncCamera && sender is UIApplication camApp)
+            {
+                var now = DateTime.UtcNow;
+                if ((now - _lastCameraSendTime).TotalMilliseconds >= 200)
+                {
+                    var view3d = camApp.ActiveUIDocument?.ActiveView as View3D;
+                    if (view3d != null)
+                    {
+                        var orientation = view3d.GetOrientation();
+                        var eye = orientation.EyePosition;
+                        var currentEye = new[] { eye.X, eye.Y, eye.Z };
+
+                        bool changed = _lastCameraEye == null
+                            || Math.Abs(currentEye[0] - _lastCameraEye[0]) > 0.001
+                            || Math.Abs(currentEye[1] - _lastCameraEye[1]) > 0.001
+                            || Math.Abs(currentEye[2] - _lastCameraEye[2]) > 0.001;
+
+                        if (changed)
+                        {
+                            _lastCameraEye = currentEye;
+                            _lastCameraSendTime = now;
+                            SendCameraToClashControl(camApp);
+                        }
                     }
                 }
             }
@@ -194,6 +225,8 @@ namespace ClashControlConnector
             _debouncer?.Clear();
             _allowedCategories = null;
             _lastSelection.Clear();
+            _activeProjectId = null;
+            _lastCameraEye = null;
 
             _lastKnownConnected = false;
             UpdateButtonStatus(false, false);
@@ -226,7 +259,9 @@ namespace ClashControlConnector
                         break;
 
                     case "export":
-                        RevitCommandHandler.Enqueue(app => ExportModel(app));
+                        var knownElements = msg["knownElements"]?.ToObject<Dictionary<string, string>>();
+                        var projectId = msg["projectId"]?.ToString();
+                        RevitCommandHandler.Enqueue(app => ExportModel(app, knownElements, projectId));
                         break;
 
                     case "cancel-export":
@@ -259,6 +294,11 @@ namespace ClashControlConnector
                         var issues = msg["issues"]?.ToObject<List<JObject>>() ?? new List<JObject>();
                         RevitCommandHandler.Enqueue(app => HandlePushClashes(app, clashes, issues));
                         break;
+
+                    case "resume-session":
+                        var resumeKnown = msg["knownElements"]?.ToObject<Dictionary<string, string>>();
+                        RevitCommandHandler.Enqueue(app => HandleResumeSession(app, resumeKnown));
+                        break;
                 }
             }
             catch (Exception ex)
@@ -271,7 +311,7 @@ namespace ClashControlConnector
 
         #region Export
 
-        private static void ExportModel(UIApplication uiApp)
+        private static void ExportModel(UIApplication uiApp, Dictionary<string, string> knownElements = null, string projectId = null)
         {
             var doc = uiApp.ActiveUIDocument?.Document;
             if (doc == null)
@@ -285,8 +325,15 @@ namespace ClashControlConnector
             _exportCts = new CancellationTokenSource();
             var ct = _exportCts.Token;
 
-            // Clear cache for fresh export
-            _cache.Clear();
+            // Store projectId for use in live update messages
+            if (projectId != null)
+                _activeProjectId = projectId;
+
+            bool isDeltaExport = knownElements != null && knownElements.Count > 0;
+
+            // Only clear cache for full exports
+            if (!isDeltaExport)
+                _cache.Clear();
 
             var allowed = GetAllowedCategories();
             var elements = CollectExportableElements(doc, allowed);
@@ -320,10 +367,53 @@ namespace ClashControlConnector
             _ = _server.SendAsync(Messages.ModelStart(doc.Title + ".rvt", elements.Count));
 
             int batchSize = 50;
-            int totalBatches = (int)Math.Ceiling(elements.Count / (double)batchSize);
-            if (totalBatches == 0) totalBatches = 1;
             long expressId = 1;
             int elementsSent = 0;
+            var unchangedGlobalIds = new List<string>();
+            var changedElementData = new List<(ElementData data, Element el)>();
+
+            // First pass: extract all elements, filter unchanged for delta exports
+            foreach (var el in elements)
+            {
+                try
+                {
+                    var elDoc = el.Document ?? doc;
+                    var data = PropertyExporter.ExtractProperties(el, elDoc);
+                    data.ExpressId = expressId++;
+                    data.Geometry = GeometryExporter.ExtractGeometry(el);
+                    if (data.Geometry == null)
+                        data.Geometry = new ElementGeometry();
+                    data.Geometry.Color = GetElementColor(el, elDoc);
+
+                    string contentHash = ContentHasher.ComputeHash(data);
+
+                    if (isDeltaExport
+                        && knownElements.TryGetValue(data.GlobalId, out var browserHash)
+                        && browserHash == contentHash)
+                    {
+                        // Element unchanged — skip sending, keep in cache
+                        unchangedGlobalIds.Add(data.GlobalId);
+                        int geomHash = (data.Geometry.Positions ?? "").GetHashCode();
+                        _cache.Add(data.GlobalId, el.Id, geomHash);
+                        _cache.SetContentHash(data.GlobalId, contentHash);
+                        continue;
+                    }
+
+                    // Populate cache for changed/new elements
+                    int gh = (data.Geometry.Positions ?? "").GetHashCode();
+                    _cache.Add(data.GlobalId, el.Id, gh);
+                    _cache.SetContentHash(data.GlobalId, contentHash);
+
+                    changedElementData.Add((data, el));
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[CC] Skip element {el.Id}: {ex.Message}");
+                }
+            }
+
+            int totalBatches = (int)Math.Ceiling(changedElementData.Count / (double)batchSize);
+            if (totalBatches == 0) totalBatches = 1;
 
             for (int batchIdx = 0; batchIdx < totalBatches; batchIdx++)
             {
@@ -335,35 +425,12 @@ namespace ClashControlConnector
 
                 var batch = new List<ElementData>();
                 int start = batchIdx * batchSize;
-                int end = Math.Min(start + batchSize, elements.Count);
+                int end = Math.Min(start + batchSize, changedElementData.Count);
 
                 for (int j = start; j < end; j++)
-                {
-                    try
-                    {
-                        var el = elements[j];
-                        // Use element's own document (handles linked model elements)
-                        var elDoc = el.Document ?? doc;
-                        var data = PropertyExporter.ExtractProperties(el, elDoc);
-                        data.ExpressId = expressId++;
-                        data.Geometry = GeometryExporter.ExtractGeometry(el);
-                        if (data.Geometry == null)
-                            data.Geometry = new ElementGeometry();
-                        data.Geometry.Color = GetElementColor(el, elDoc);
+                    batch.Add(changedElementData[j].data);
 
-                        // Populate cache
-                        int geomHash = (data.Geometry.Positions ?? "").GetHashCode();
-                        _cache.Add(data.GlobalId, el.Id, geomHash);
-
-                        batch.Add(data);
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.WriteLine($"[CC] Skip element {elements[j].Id}: {ex.Message}");
-                    }
-                }
-
-                var sendTask = _server.SendAsync(Messages.ElementBatch(batchIdx, totalBatches, batch));
+                var sendTask = _server.SendAsync(Messages.ElementBatch(batchIdx, totalBatches, batch, _activeProjectId));
                 if (!sendTask.Wait(TimeSpan.FromSeconds(10)))
                 {
                     Debug.WriteLine("[CC] Send timed out during export, aborting");
@@ -397,7 +464,25 @@ namespace ClashControlConnector
                 elevation = Math.Round(l.Elevation * 304.8, 1)
             }).ToList();
 
-            _ = _server.SendAsync(Messages.ModelEnd(storeys, storeyData, relatedPairs));
+            // Include unchanged list for delta exports
+            var unchanged = isDeltaExport && unchangedGlobalIds.Count > 0 ? unchangedGlobalIds : null;
+            _ = _server.SendAsync(Messages.ModelEnd(storeys, storeyData, relatedPairs, unchanged, _activeProjectId));
+
+            if (isDeltaExport)
+                Debug.WriteLine($"[CC] Delta export: {elementsSent} changed, {unchangedGlobalIds.Count} unchanged");
+        }
+
+        private static void HandleResumeSession(UIApplication uiApp, Dictionary<string, string> knownElements)
+        {
+            // If cache is empty (Revit was restarted, or no prior export), we can't diff
+            if (_cache.IsEmpty)
+            {
+                _ = _server.SendAsync(Messages.SessionExpired());
+                return;
+            }
+
+            // Cache exists — treat as a delta export using the browser's known hashes
+            ExportModel(uiApp, knownElements);
         }
 
         private static float[] GetElementColor(Element element, Document doc)
@@ -686,10 +771,11 @@ namespace ClashControlConnector
                         _cache.Remove(eid);
                     }
 
-                    _ = _server.SendAsync(Messages.ElementUpdateDeleted(deletedGids, deletedRevitIds));
+                    _ = _server.SendAsync(Messages.ElementUpdateDeleted(deletedGids, deletedRevitIds, _activeProjectId));
                 }
 
-                var fullUpdateElements = new List<Element>();
+                var addedElements = new List<Element>();
+                var modifiedElements = new List<Element>();
                 var allowed = GetAllowedCategories();
 
                 foreach (var eid in added)
@@ -697,7 +783,7 @@ namespace ClashControlConnector
                     var el = doc.GetElement(eid);
                     if (el?.Category == null || IsSkippedCategory(el.Category)) continue;
                     if (!ShouldExport(el.Category, allowed)) continue;
-                    fullUpdateElements.Add(el);
+                    addedElements.Add(el);
                 }
 
                 foreach (var eid in modified)
@@ -708,13 +794,14 @@ namespace ClashControlConnector
                     var el = doc.GetElement(eid);
                     if (el?.Category == null || IsSkippedCategory(el.Category)) continue;
 
-                    fullUpdateElements.Add(el);
+                    modifiedElements.Add(el);
                 }
 
-                if (fullUpdateElements.Count > 0)
+                // Added elements always get full geometry
+                if (addedElements.Count > 0)
                 {
                     var batch = new List<ElementData>();
-                    foreach (var el in fullUpdateElements)
+                    foreach (var el in addedElements)
                     {
                         try
                         {
@@ -732,7 +819,50 @@ namespace ClashControlConnector
                     }
 
                     if (batch.Count > 0)
-                        _ = _server.SendAsync(Messages.ElementUpdateModified(batch));
+                        _ = _server.SendAsync(Messages.ElementUpdateModified(batch, _activeProjectId));
+                }
+
+                // Modified elements: check if geometry actually changed
+                if (modifiedElements.Count > 0)
+                {
+                    var geometryBatch = new List<ElementData>();
+                    var propertiesBatch = new List<ElementData>();
+
+                    foreach (var el in modifiedElements)
+                    {
+                        try
+                        {
+                            var data = PropertyExporter.ExtractProperties(el, doc);
+                            var geom = GeometryExporter.ExtractGeometry(el);
+                            if (geom == null) geom = new ElementGeometry();
+                            geom.Color = GetElementColor(el, doc);
+
+                            int newGeomHash = (geom.Positions ?? "").GetHashCode();
+
+                            if (_cache.HasGeometryChanged(el.Id, newGeomHash))
+                            {
+                                // Geometry changed — full update
+                                data.Geometry = geom;
+                                _cache.Add(data.GlobalId, el.Id, newGeomHash);
+                                geometryBatch.Add(data);
+                            }
+                            else
+                            {
+                                // Only properties changed — skip geometry payload
+                                _cache.UpdateGeometryHash(el.Id, newGeomHash);
+                                propertiesBatch.Add(data);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine($"[CC] Update skip {el.Id}: {ex.Message}");
+                        }
+                    }
+
+                    if (geometryBatch.Count > 0)
+                        _ = _server.SendAsync(Messages.ElementUpdateModified(geometryBatch, _activeProjectId));
+                    if (propertiesBatch.Count > 0)
+                        _ = _server.SendAsync(Messages.ElementUpdatePropertiesOnly(propertiesBatch, _activeProjectId));
                 }
 
             });
