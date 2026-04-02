@@ -752,6 +752,18 @@ namespace ClashControlConnector
         private static void OnDocumentSynced(object sender, DocumentSynchronizedWithCentralEventArgs e)
         {
             if (!_server.IsClientConnected) return;
+
+            // Revit may fire additional DocumentChanged events AFTER this event.
+            // Schedule a delayed flush to catch trailing changes.
+            Task.Delay(2000).ContinueWith(_ =>
+            {
+                if (_debouncer.HasChanges)
+                {
+                    Debug.WriteLine("[CC] Post-sync flush — sending accumulated changes");
+                    _debouncer.Flush();
+                }
+            });
+
             if (!_debouncer.HasChanges) return;
 
             Debug.WriteLine("[CC] Sync with Central detected — flushing accumulated changes");
