@@ -323,6 +323,27 @@ namespace ClashControlConnector
 
         #region Export
 
+        /// <summary>
+        /// Holds state for a chunked export that processes elements across
+        /// multiple ExternalEvent callbacks to keep Revit responsive.
+        /// </summary>
+        private class ExportState
+        {
+            public Document Doc;
+            public List<List<Element>> ModelBatches = new List<List<Element>>();
+            public Dictionary<string, string> KnownElements;
+            public bool IsDeltaExport;
+            public CancellationToken Ct;
+
+            public int ModelIndex;
+            public int ElementIndex;
+            public long ExpressId;
+            public int ElementsSent;
+            public int TotalElements;
+            public List<string> UnchangedGlobalIds = new List<string>();
+            public List<ElementData> PendingData = new List<ElementData>();
+        }
+
         private static void ExportModel(UIApplication uiApp, Dictionary<string, string> knownElements = null, string projectId = null)
         {
             var doc = uiApp.ActiveUIDocument?.Document;
@@ -335,7 +356,6 @@ namespace ClashControlConnector
             // Cancel any in-progress export
             _exportCts?.Cancel();
             _exportCts = new CancellationTokenSource();
-            var ct = _exportCts.Token;
 
             // Store projectId for use in live update messages
             if (projectId != null)
@@ -347,9 +367,22 @@ namespace ClashControlConnector
             if (!isDeltaExport)
                 _cache.Clear();
 
+            // Collect host model elements first
             var allowed = GetAllowedCategories();
-            var elements = CollectExportableElements(doc, allowed);
+            var state = new ExportState
+            {
+                Doc = doc,
+                KnownElements = knownElements,
+                IsDeltaExport = isDeltaExport,
+                Ct = _exportCts.Token
+            };
 
+            var hostElements = CollectExportableElements(doc, allowed);
+            state.ModelBatches.Add(hostElements);
+            state.TotalElements = hostElements.Count;
+            Debug.WriteLine($"[CC] Host model '{doc.Title}': {hostElements.Count} elements");
+
+            // Queue linked models to be collected and sent one at a time
             if (ConnectorSettings.IncludeLinkedModels)
             {
                 var linkInstances = new FilteredElementCollector(doc)
@@ -365,7 +398,8 @@ namespace ClashControlConnector
                     try
                     {
                         var linkElements = CollectExportableElements(linkDoc, allowed);
-                        elements.AddRange(linkElements);
+                        state.ModelBatches.Add(linkElements);
+                        state.TotalElements += linkElements.Count;
                         Debug.WriteLine($"[CC] Linked model '{linkDoc.Title}': {linkElements.Count} elements");
                     }
                     catch (Exception ex)
@@ -375,95 +409,124 @@ namespace ClashControlConnector
                 }
             }
 
-            // Send model-start
-            _ = _server.SendAsync(Messages.ModelStart(doc.Title + ".rvt", elements.Count));
+            _ = _server.SendAsync(Messages.ModelStart(doc.Title + ".rvt", state.TotalElements));
 
-            int batchSize = 50;
-            long expressId = 1;
-            int elementsSent = 0;
-            var unchangedGlobalIds = new List<string>();
-            var changedElementData = new List<(ElementData data, Element el)>();
+            // Start chunked processing
+            ProcessExportChunk(state);
+        }
 
-            // First pass: extract all elements, filter unchanged for delta exports
-            foreach (var el in elements)
+        private static void ProcessExportChunk(ExportState state)
+        {
+            if (state.Ct.IsCancellationRequested)
             {
-                try
+                _ = _server.SendAsync(Messages.ExportCancelled(state.ElementsSent));
+                return;
+            }
+
+            RevitCommandHandler.Enqueue(app =>
+            {
+                var doc = app.ActiveUIDocument?.Document;
+                if (doc == null || !_server.IsClientConnected) return;
+
+                int chunkSize = 25;
+                int batchSize = 50;
+                var elements = state.ModelBatches[state.ModelIndex];
+                int end = Math.Min(state.ElementIndex + chunkSize, elements.Count);
+
+                for (int i = state.ElementIndex; i < end; i++)
                 {
-                    var elDoc = el.Document ?? doc;
-                    var data = PropertyExporter.ExtractProperties(el, elDoc);
-                    data.ExpressId = expressId++;
-                    data.Geometry = GeometryExporter.ExtractGeometry(el);
-                    if (data.Geometry == null)
-                        data.Geometry = new ElementGeometry();
-                    data.Geometry.Color = GetElementColor(el, elDoc);
-
-                    string contentHash = ContentHasher.ComputeHash(data);
-
-                    if (isDeltaExport
-                        && knownElements.TryGetValue(data.GlobalId, out var browserHash)
-                        && browserHash == contentHash)
+                    try
                     {
-                        // Element unchanged — skip sending, keep in cache
-                        unchangedGlobalIds.Add(data.GlobalId);
-                        int geomHash = (data.Geometry.Positions ?? "").GetHashCode();
-                        _cache.Add(data.GlobalId, el.Id, geomHash);
+                        var el = elements[i];
+                        var elDoc = el.Document ?? doc;
+                        var data = PropertyExporter.ExtractProperties(el, elDoc);
+                        data.ExpressId = ++state.ExpressId;
+                        data.Geometry = GeometryExporter.ExtractGeometry(el);
+                        if (data.Geometry == null)
+                            data.Geometry = new ElementGeometry();
+                        data.Geometry.Color = GetElementColor(el, elDoc);
+
+                        string contentHash = ContentHasher.ComputeHash(data);
+
+                        if (state.IsDeltaExport
+                            && state.KnownElements.TryGetValue(data.GlobalId, out var browserHash)
+                            && browserHash == contentHash)
+                        {
+                            state.UnchangedGlobalIds.Add(data.GlobalId);
+                            int geomHash = (data.Geometry.Positions ?? "").GetHashCode();
+                            _cache.Add(data.GlobalId, el.Id, geomHash);
+                            _cache.SetContentHash(data.GlobalId, contentHash);
+                            continue;
+                        }
+
+                        int gh = (data.Geometry.Positions ?? "").GetHashCode();
+                        _cache.Add(data.GlobalId, el.Id, gh);
                         _cache.SetContentHash(data.GlobalId, contentHash);
-                        continue;
+                        state.PendingData.Add(data);
                     }
-
-                    // Populate cache for changed/new elements
-                    int gh = (data.Geometry.Positions ?? "").GetHashCode();
-                    _cache.Add(data.GlobalId, el.Id, gh);
-                    _cache.SetContentHash(data.GlobalId, contentHash);
-
-                    changedElementData.Add((data, el));
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[CC] Skip element {elements[i].Id}: {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
+
+                state.ElementIndex = end;
+
+                // Send any full batches
+                int totalBatches = (int)Math.Ceiling(state.TotalElements / (double)batchSize);
+                while (state.PendingData.Count >= batchSize)
                 {
-                    Debug.WriteLine($"[CC] Skip element {el.Id}: {ex.Message}");
+                    var batch = state.PendingData.GetRange(0, batchSize);
+                    state.PendingData.RemoveRange(0, batchSize);
+                    int batchIdx = state.ElementsSent / batchSize;
+                    _ = _server.SendAsync(Messages.ElementBatch(batchIdx, totalBatches, batch, _activeProjectId));
+                    state.ElementsSent += batch.Count;
                 }
-            }
 
-            int totalBatches = (int)Math.Ceiling(changedElementData.Count / (double)batchSize);
-            if (totalBatches == 0) totalBatches = 1;
+                // Check if current model is done
+                if (state.ElementIndex >= elements.Count)
+                {
+                    state.ModelIndex++;
+                    state.ElementIndex = 0;
+                }
 
-            for (int batchIdx = 0; batchIdx < totalBatches; batchIdx++)
+                if (state.ModelIndex < state.ModelBatches.Count)
+                {
+                    // More models/elements to process — yield and continue
+                    ProcessExportChunk(state);
+                }
+                else
+                {
+                    // All models done — send remaining and finish
+                    FinishExport(app, state);
+                }
+            });
+        }
+
+        private static void FinishExport(UIApplication uiApp, ExportState state)
+        {
+            int batchSize = 50;
+
+            // Send any remaining elements as a final batch
+            if (state.PendingData.Count > 0)
             {
-                if (ct.IsCancellationRequested)
-                {
-                    _ = _server.SendAsync(Messages.ExportCancelled(elementsSent));
-                    return;
-                }
-
-                var batch = new List<ElementData>();
-                int start = batchIdx * batchSize;
-                int end = Math.Min(start + batchSize, changedElementData.Count);
-
-                for (int j = start; j < end; j++)
-                    batch.Add(changedElementData[j].data);
-
-                var sendTask = _server.SendAsync(Messages.ElementBatch(batchIdx, totalBatches, batch, _activeProjectId));
-                if (!sendTask.Wait(TimeSpan.FromSeconds(10)))
-                {
-                    Debug.WriteLine("[CC] Send timed out during export, aborting");
-                    _ = _server.SendAsync(Messages.ModelError("Send timed out", elementsSent));
-                    return;
-                }
-                if (!sendTask.Result)
-                {
-                    Debug.WriteLine("[CC] Client disconnected during export, aborting");
-                    return;
-                }
-
-                elementsSent += batch.Count;
+                int totalBatches = (int)Math.Ceiling(state.TotalElements / (double)batchSize);
+                int batchIdx = state.ElementsSent / batchSize;
+                _ = _server.SendAsync(Messages.ElementBatch(batchIdx, Math.Max(totalBatches, batchIdx + 1), state.PendingData, _activeProjectId));
+                state.ElementsSent += state.PendingData.Count;
             }
+
+            // Gather all elements for relationship building
+            var allElements = new List<Element>();
+            foreach (var batch in state.ModelBatches)
+                allElements.AddRange(batch);
 
             // Build relationships using the now-populated cache
             var (hostIds, hostRelationships, relatedPairs) =
-                RelationshipExporter.BuildRelationships(elements, doc, _cache);
+                RelationshipExporter.BuildRelationships(allElements, state.Doc, _cache);
 
             // Collect storeys
-            var levels = new FilteredElementCollector(doc)
+            var levels = new FilteredElementCollector(state.Doc)
                 .OfClass(typeof(Level))
                 .Cast<Level>()
                 .OrderBy(l => l.Elevation)
@@ -476,12 +539,12 @@ namespace ClashControlConnector
                 elevation = Math.Round(l.Elevation * 304.8, 1)
             }).ToList();
 
-            // Include unchanged list for delta exports
-            var unchanged = isDeltaExport && unchangedGlobalIds.Count > 0 ? unchangedGlobalIds : null;
+            var unchanged = state.IsDeltaExport && state.UnchangedGlobalIds.Count > 0
+                ? state.UnchangedGlobalIds : null;
             _ = _server.SendAsync(Messages.ModelEnd(storeys, storeyData, relatedPairs, unchanged, _activeProjectId));
 
-            if (isDeltaExport)
-                Debug.WriteLine($"[CC] Delta export: {elementsSent} changed, {unchangedGlobalIds.Count} unchanged");
+            if (state.IsDeltaExport)
+                Debug.WriteLine($"[CC] Delta export: {state.ElementsSent} changed, {state.UnchangedGlobalIds.Count} unchanged");
         }
 
         private static void HandleResumeSession(UIApplication uiApp, Dictionary<string, string> knownElements)
