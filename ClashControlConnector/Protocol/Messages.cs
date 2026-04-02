@@ -9,7 +9,7 @@ namespace ClashControlConnector.Protocol
 
         public static string Pong()
         {
-            return JsonConvert.SerializeObject(new { type = "pong" });
+            return JsonConvert.SerializeObject(new { type = "pong", connectorVersion = App.Version });
         }
 
         public static string Status(bool connected, string documentName)
@@ -19,7 +19,8 @@ namespace ClashControlConnector.Protocol
                 type = "status",
                 connected,
                 documentName,
-                version = ProtocolVersion
+                version = ProtocolVersion,
+                connectorVersion = App.Version
             });
         }
 
