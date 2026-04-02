@@ -378,56 +378,22 @@ namespace ClashControlConnector
             // Send model-start
             _ = _server.SendAsync(Messages.ModelStart(doc.Title + ".rvt", elements.Count));
 
+            // Process elements in chunks via ExternalEvent to avoid freezing Revit
+            int chunkSize = 25;
+            int totalChunks = (int)Math.Ceiling(elements.Count / (double)chunkSize);
+            if (totalChunks == 0) totalChunks = 1;
+
             int batchSize = 50;
-            long expressId = 1;
-            int elementsSent = 0;
+            long expressId = 0;
             var unchangedGlobalIds = new List<string>();
-            var changedElementData = new List<(ElementData data, Element el)>();
+            var pendingData = new List<ElementData>();
+            int elementsSent = 0;
+            int chunkIndex = 0;
 
-            // First pass: extract all elements, filter unchanged for delta exports
-            foreach (var el in elements)
-            {
-                try
-                {
-                    var elDoc = el.Document ?? doc;
-                    var data = PropertyExporter.ExtractProperties(el, elDoc);
-                    data.ExpressId = expressId++;
-                    data.Geometry = GeometryExporter.ExtractGeometry(el);
-                    if (data.Geometry == null)
-                        data.Geometry = new ElementGeometry();
-                    data.Geometry.Color = GetElementColor(el, elDoc);
+            // Schedule first chunk
+            ProcessExportChunk();
 
-                    string contentHash = ContentHasher.ComputeHash(data);
-
-                    if (isDeltaExport
-                        && knownElements.TryGetValue(data.GlobalId, out var browserHash)
-                        && browserHash == contentHash)
-                    {
-                        // Element unchanged — skip sending, keep in cache
-                        unchangedGlobalIds.Add(data.GlobalId);
-                        int geomHash = (data.Geometry.Positions ?? "").GetHashCode();
-                        _cache.Add(data.GlobalId, el.Id, geomHash);
-                        _cache.SetContentHash(data.GlobalId, contentHash);
-                        continue;
-                    }
-
-                    // Populate cache for changed/new elements
-                    int gh = (data.Geometry.Positions ?? "").GetHashCode();
-                    _cache.Add(data.GlobalId, el.Id, gh);
-                    _cache.SetContentHash(data.GlobalId, contentHash);
-
-                    changedElementData.Add((data, el));
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"[CC] Skip element {el.Id}: {ex.Message}");
-                }
-            }
-
-            int totalBatches = (int)Math.Ceiling(changedElementData.Count / (double)batchSize);
-            if (totalBatches == 0) totalBatches = 1;
-
-            for (int batchIdx = 0; batchIdx < totalBatches; batchIdx++)
+            void ProcessExportChunk()
             {
                 if (ct.IsCancellationRequested)
                 {
@@ -435,27 +401,88 @@ namespace ClashControlConnector
                     return;
                 }
 
-                var batch = new List<ElementData>();
-                int start = batchIdx * batchSize;
-                int end = Math.Min(start + batchSize, changedElementData.Count);
-
-                for (int j = start; j < end; j++)
-                    batch.Add(changedElementData[j].data);
-
-                var sendTask = _server.SendAsync(Messages.ElementBatch(batchIdx, totalBatches, batch, _activeProjectId));
-                if (!sendTask.Wait(TimeSpan.FromSeconds(10)))
+                RevitCommandHandler.Enqueue(app =>
                 {
-                    Debug.WriteLine("[CC] Send timed out during export, aborting");
-                    _ = _server.SendAsync(Messages.ModelError("Send timed out", elementsSent));
-                    return;
-                }
-                if (!sendTask.Result)
-                {
-                    Debug.WriteLine("[CC] Client disconnected during export, aborting");
-                    return;
-                }
+                    var chunkDoc = app.ActiveUIDocument?.Document;
+                    if (chunkDoc == null || !_server.IsClientConnected) return;
 
-                elementsSent += batch.Count;
+                    int start = chunkIndex * chunkSize;
+                    int end = Math.Min(start + chunkSize, elements.Count);
+
+                    for (int i = start; i < end; i++)
+                    {
+                        try
+                        {
+                            var el = elements[i];
+                            var elDoc = el.Document ?? chunkDoc;
+                            var data = PropertyExporter.ExtractProperties(el, elDoc);
+                            data.ExpressId = ++expressId;
+                            data.Geometry = GeometryExporter.ExtractGeometry(el);
+                            if (data.Geometry == null)
+                                data.Geometry = new ElementGeometry();
+                            data.Geometry.Color = GetElementColor(el, elDoc);
+
+                            string contentHash = ContentHasher.ComputeHash(data);
+
+                            if (isDeltaExport
+                                && knownElements.TryGetValue(data.GlobalId, out var browserHash)
+                                && browserHash == contentHash)
+                            {
+                                unchangedGlobalIds.Add(data.GlobalId);
+                                int geomHash = (data.Geometry.Positions ?? "").GetHashCode();
+                                _cache.Add(data.GlobalId, el.Id, geomHash);
+                                _cache.SetContentHash(data.GlobalId, contentHash);
+                                continue;
+                            }
+
+                            int gh = (data.Geometry.Positions ?? "").GetHashCode();
+                            _cache.Add(data.GlobalId, el.Id, gh);
+                            _cache.SetContentHash(data.GlobalId, contentHash);
+                            pendingData.Add(data);
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine($"[CC] Skip element {elements[i].Id}: {ex.Message}");
+                        }
+                    }
+
+                    // Send any full batches accumulated so far
+                    while (pendingData.Count >= batchSize)
+                    {
+                        var batch = pendingData.GetRange(0, batchSize);
+                        pendingData.RemoveRange(0, batchSize);
+                        int totalBatches = (int)Math.Ceiling(elements.Count / (double)batchSize);
+                        int batchIdx = elementsSent / batchSize;
+                        _ = _server.SendAsync(Messages.ElementBatch(batchIdx, totalBatches, batch, _activeProjectId));
+                        elementsSent += batch.Count;
+                    }
+
+                    chunkIndex++;
+
+                    if (chunkIndex < totalChunks)
+                    {
+                        // Schedule next chunk — yields control back to Revit between chunks
+                        ProcessExportChunk();
+                    }
+                    else
+                    {
+                        // Final chunk done — send remaining elements and finish
+                        FinishExport(app, elements, chunkDoc, isDeltaExport, unchangedGlobalIds, pendingData, elementsSent);
+                    }
+                });
+            }
+        }
+
+        private static void FinishExport(UIApplication uiApp, List<Element> elements, Document doc,
+            bool isDeltaExport, List<string> unchangedGlobalIds, List<ElementData> pendingData, int elementsSent)
+        {
+            // Send any remaining elements as a final batch
+            if (pendingData.Count > 0)
+            {
+                int totalBatches = (int)Math.Ceiling(elements.Count / (double)50);
+                int batchIdx = elementsSent / 50;
+                _ = _server.SendAsync(Messages.ElementBatch(batchIdx, Math.Max(totalBatches, batchIdx + 1), pendingData, _activeProjectId));
+                elementsSent += pendingData.Count;
             }
 
             // Build relationships using the now-populated cache
