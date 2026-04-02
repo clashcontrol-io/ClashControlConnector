@@ -34,25 +34,28 @@ namespace ClashControlConnector.Protocol
             });
         }
 
-        public static string ElementBatch(int batchIndex, int totalBatches, List<ElementData> elements)
+        public static string ElementBatch(int batchIndex, int totalBatches, List<ElementData> elements, string projectId = null)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "element-batch",
                 batchIndex,
                 totalBatches,
-                elements
+                elements,
+                projectId
             });
         }
 
-        public static string ModelEnd(List<string> storeys, List<object> storeyData, Dictionary<string, bool> relatedPairs)
+        public static string ModelEnd(List<string> storeys, List<object> storeyData, Dictionary<string, bool> relatedPairs, List<string> unchanged = null, string projectId = null)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "model-end",
                 storeys,
                 storeyData,
-                relatedPairs
+                relatedPairs,
+                unchanged,
+                projectId
             });
         }
 
@@ -66,34 +69,37 @@ namespace ClashControlConnector.Protocol
             });
         }
 
-        public static string ElementUpdateModified(List<ElementData> elements)
+        public static string ElementUpdateModified(List<ElementData> elements, string projectId = null)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "element-update",
                 action = "modified",
-                elements
+                elements,
+                projectId
             });
         }
 
-        public static string ElementUpdatePropertiesOnly(List<ElementData> elements)
+        public static string ElementUpdatePropertiesOnly(List<ElementData> elements, string projectId = null)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "element-update",
                 action = "properties-only",
-                elements
+                elements,
+                projectId
             });
         }
 
-        public static string ElementUpdateDeleted(List<string> globalIds, List<long> revitIds)
+        public static string ElementUpdateDeleted(List<string> globalIds, List<long> revitIds, string projectId = null)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "element-update",
                 action = "deleted",
                 globalIds,
-                revitIds
+                revitIds,
+                projectId
             });
         }
 
