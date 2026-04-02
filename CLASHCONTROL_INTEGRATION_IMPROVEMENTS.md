@@ -165,6 +165,178 @@ Users shouldn't have to think about this. The moment they connect Revit to a pro
 
 ---
 
+## 13. Selection Sync (Revit → Browser)
+
+### Problem
+Currently selection only flows one direction: browser highlights elements in Revit. When a user clicks an element in Revit, ClashControl has no way to know about it.
+
+### What the plugin sends
+When the user selects elements in Revit, the plugin sends:
+```json
+{
+  "type": "selection-changed",
+  "globalIds": ["2O2Fr$t4X7Zf8NOew3FLOH", "3$FW1pz_95MuVQrrPiRekb"]
+}
+```
+
+### What to do
+Listen for `selection-changed` messages. When received:
+- Highlight the corresponding elements in the 3D viewer (outline, glow, or camera focus)
+- Show element properties in the sidebar if a single element is selected
+- Clear highlight when an empty `globalIds` array is received (user deselected)
+- This is a user-toggleable feature — respect a "Sync selection from Revit" setting
+
+---
+
+## 14. Content-Addressable Caching — Browser Side
+
+### Problem
+On re-export, the plugin currently re-sends every element even if nothing changed. With content-addressable hashing, the plugin can skip unchanged elements — but the browser needs to participate.
+
+### Protocol
+On `export` request, browser sends known element hashes:
+```json
+{
+  "type": "export",
+  "knownElements": {
+    "2O2Fr$t4X7Zf8NOew3FLOH": "a1b2c3d4",
+    "3$FW1pz_95MuVQrrPiRekb": "e5f6g7h8"
+  }
+}
+```
+
+The plugin responds with:
+- `element-batch` messages containing only changed/new elements
+- A `model-end` message with an `unchanged` array of GlobalIds that are still valid
+
+### What to do
+1. After each full export, store a `globalId → contentHash` map (localStorage or IndexedDB)
+2. On export request, include `knownElements` in the message
+3. On `model-end`, check the `unchanged` array — keep those elements in the store as-is
+4. Remove any elements NOT in `unchanged` and NOT received in batches (they were deleted)
+
+---
+
+## 15. Camera Sync
+
+### Problem
+When viewing clashes, users frequently switch between the 3D viewer and Revit to compare perspectives. Manually navigating to the same viewpoint in both tools is tedious.
+
+### Protocol
+Bidirectional camera position messages:
+```json
+{
+  "type": "camera-sync",
+  "position": [10.5, 3.2, -5.0],
+  "target": [12.0, 3.0, -4.5],
+  "up": [0, 1, 0],
+  "fov": 60
+}
+```
+Coordinates are in meters, Y-up (same as element geometry).
+
+### What to do
+- **Receive from plugin**: When `camera-sync` arrives from the connector, animate the Three.js camera to the given position/target. Apply FOV if using perspective projection.
+- **Send to plugin**: When the user enables "Sync camera to Revit", throttle camera change events (max 5/sec) and send `camera-sync` messages. The plugin will update Revit's active 3D view.
+- This is a user-toggleable feature — respect a "Sync camera" setting. Default off to avoid unexpected Revit view changes.
+
+---
+
+## 16. Session Resumption on Reconnect
+
+### Problem
+When the WebSocket reconnects (after network drop, Revit restart, or sleep/wake), the current behavior requires a full re-export. For large models this takes 10-30 seconds.
+
+### What to do
+On reconnect:
+1. Send a `resume-session` message with the stored `knownElements` hash map (from improvement #14)
+2. The plugin compares against its cache and responds with only the delta
+3. If the plugin has no cache (Revit was restarted), it responds with `session-expired` and the browser falls back to full export
+
+This builds on improvement #14 — the same hash infrastructure serves both re-export optimization and session resumption.
+
+---
+
+---
+
+# Connector-Side Improvements (Revit Plugin)
+
+These changes are implemented in the ClashControlConnector plugin. Listed here so both sides of the integration are documented in one place.
+
+---
+
+## C1. Smarter Change Tracking — Geometry vs Property Discrimination
+
+### Problem
+Currently, every modified element triggers a full geometry re-extraction + property extraction. When a user only renames an element or changes a parameter value, geometry hasn't changed — but the plugin doesn't know that.
+
+### What the plugin does
+Uses the Revit DMU `IUpdater` framework with separate triggers:
+- `Element.GetChangeTypeGeometry()` — tags elements that need geometry re-extraction
+- `Element.GetChangeTypeParameter()` — tags elements that only need property re-extraction
+
+On flush, elements tagged geometry-only get full `"modified"` updates. Elements tagged parameter-only get `"properties-only"` updates (no geometry payload).
+
+### Impact on browser
+None — the browser already handles `properties-only` updates (section 2 above). This just means they'll actually arrive more often now.
+
+---
+
+## C2. Faster Geometry Extraction + LOD Setting
+
+### Problem
+The plugin uses `ComputeReferences = true` (unnecessary overhead — we don't use References) and `DetailLevel.Fine` (maximum triangle count, overkill for clash detection).
+
+### What the plugin does
+- Sets `ComputeReferences = false`
+- Adds a user-configurable LOD setting (Coarse / Medium / Fine) with Medium as default
+- Medium produces fewer triangles while preserving enough detail for clash detection
+
+### Impact on browser
+Fewer triangles per element → faster rendering, lower memory. No protocol changes needed.
+
+---
+
+## C3. Selection Sync (Revit → Browser)
+
+### What the plugin does
+Subscribes to `SelectionChanged` event (Revit 2023+). When user selects elements in Revit, sends `selection-changed` message with GlobalIds resolved from the element cache. User can toggle this on/off in connector settings.
+
+### Impact on browser
+See section 13 above — browser must handle `selection-changed` messages.
+
+---
+
+## C4. Camera Sync
+
+### What the plugin does
+Reads the active 3D view's camera position (eye, target, up, FOV). Converts from Revit coordinates (feet, Z-up) to ClashControl coordinates (meters, Y-up). Sends `camera-sync` message on view change. Also handles incoming `camera-sync` from browser to update the Revit 3D view. User can toggle on/off.
+
+### Impact on browser
+See section 15 above — browser must send/receive `camera-sync` messages.
+
+---
+
+## C5. Content-Addressable Caching
+
+### What the plugin does
+Computes a content hash for each exported element (geometry + properties combined). Stores hashes in `ElementCache`. On re-export, if browser sends `knownElements` with hashes, the plugin compares and only sends changed/new elements. Includes an `unchanged` array in `model-end`.
+
+### Impact on browser
+See section 14 above — browser must send known hashes and handle `unchanged` array.
+
+---
+
+## C6. Session Resumption
+
+### What the plugin does
+Handles `resume-session` message from browser. Compares browser's known element hashes against cache. Sends delta (changed/new elements only). If cache is empty (Revit was restarted), responds with `session-expired` so browser can fall back to full export.
+
+### Impact on browser
+See section 16 above.
+
+---
+
 ## Summary of New Message Types to Support
 
 | Direction | Type | Action |
@@ -178,3 +350,10 @@ Users shouldn't have to think about this. The moment they connect Revit to a pro
 | Browser → Plugin | `cancel-export` | **NEW** — abort running export |
 | Browser → Plugin | `clear-highlights` | **NEW** — remove all Revit overrides |
 | Browser → Plugin | `export` | Should include `projectId` for routing |
+| Plugin → Browser | `selection-changed` | **NEW** — Revit selection sync with `globalIds` |
+| Browser → Plugin | `camera-sync` | **NEW** — browser camera position for Revit sync |
+| Plugin → Browser | `camera-sync` | **NEW** — Revit camera position for browser sync |
+| Browser → Plugin | `export` | Can include `knownElements` hash map for delta export |
+| Plugin → Browser | `model-end` | Can include `unchanged` array of still-valid GlobalIds |
+| Browser → Plugin | `resume-session` | **NEW** — reconnect with known element hashes |
+| Plugin → Browser | `session-expired` | **NEW** — cache miss, full re-export needed |
