@@ -36,6 +36,7 @@ namespace ClashControlConnector
         private static HashSet<ElementId> _lastSelection = new HashSet<ElementId>();
         private static double[] _lastCameraEye;
         private static DateTime _lastCameraSendTime = DateTime.MinValue;
+        private static DateTime _lastSelectionCheckTime = DateTime.MinValue;
 
         public static WsServer Server => _server;
         public static ElementCache Cache => _cache;
@@ -94,9 +95,16 @@ namespace ClashControlConnector
                 UpdateButtonStatus(running, connected);
             }
 
-            // Selection sync: check if selection changed since last idle
-            if (connected && ConnectorSettings.SyncSelection && sender is UIApplication uiApp)
+            // Throttle all polling to avoid slowing Revit's idle loop
+            if (!connected || !(sender is UIApplication uiApp)) return;
+
+            var now = DateTime.UtcNow;
+
+            // Selection sync: check at most 4x/sec (every 250ms)
+            if (ConnectorSettings.SyncSelection
+                && (now - _lastSelectionCheckTime).TotalMilliseconds >= 250)
             {
+                _lastSelectionCheckTime = now;
                 var uidoc = uiApp.ActiveUIDocument;
                 if (uidoc != null)
                 {
@@ -115,30 +123,31 @@ namespace ClashControlConnector
                 }
             }
 
-            // Camera sync: send Revit camera to browser (throttled to max 5/sec)
-            if (connected && ConnectorSettings.SyncCamera && sender is UIApplication camApp)
+            // Camera sync: check at most 2x/sec (every 500ms)
+            if (ConnectorSettings.SyncCamera
+                && (now - _lastCameraSendTime).TotalMilliseconds >= 500)
             {
-                var now = DateTime.UtcNow;
-                if ((now - _lastCameraSendTime).TotalMilliseconds >= 200)
+                var view3d = uiApp.ActiveUIDocument?.ActiveView as View3D;
+                if (view3d != null)
                 {
-                    var view3d = camApp.ActiveUIDocument?.ActiveView as View3D;
-                    if (view3d != null)
+                    var orientation = view3d.GetOrientation();
+                    var eye = orientation.EyePosition;
+
+                    bool changed = _lastCameraEye == null
+                        || Math.Abs(eye.X - _lastCameraEye[0]) > 0.001
+                        || Math.Abs(eye.Y - _lastCameraEye[1]) > 0.001
+                        || Math.Abs(eye.Z - _lastCameraEye[2]) > 0.001;
+
+                    if (changed)
                     {
-                        var orientation = view3d.GetOrientation();
-                        var eye = orientation.EyePosition;
-                        var currentEye = new[] { eye.X, eye.Y, eye.Z };
-
-                        bool changed = _lastCameraEye == null
-                            || Math.Abs(currentEye[0] - _lastCameraEye[0]) > 0.001
-                            || Math.Abs(currentEye[1] - _lastCameraEye[1]) > 0.001
-                            || Math.Abs(currentEye[2] - _lastCameraEye[2]) > 0.001;
-
-                        if (changed)
-                        {
-                            _lastCameraEye = currentEye;
-                            _lastCameraSendTime = now;
-                            SendCameraToClashControl(camApp);
-                        }
+                        _lastCameraEye = new[] { eye.X, eye.Y, eye.Z };
+                        _lastCameraSendTime = now;
+                        SendCameraToClashControl(uiApp);
+                    }
+                    else
+                    {
+                        // No change — push next check further out
+                        _lastCameraSendTime = now;
                     }
                 }
             }
