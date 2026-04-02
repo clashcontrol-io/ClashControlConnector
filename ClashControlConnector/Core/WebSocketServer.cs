@@ -75,8 +75,31 @@ namespace ClashControlConnector.Core
 
                     if (!context.Request.IsWebSocketRequest)
                     {
-                        context.Response.StatusCode = 400;
-                        context.Response.Close();
+                        // Respond to HTTP health checks (e.g. GET /) with status JSON
+                        if (context.Request.HttpMethod == "GET")
+                        {
+                            var statusJson = Encoding.UTF8.GetBytes(
+                                $"{{\"status\":\"ok\",\"connectorVersion\":\"{App.Version}\"}}");
+                            context.Response.StatusCode = 200;
+                            context.Response.ContentType = "application/json";
+                            context.Response.Headers.Add("Access-Control-Allow-Origin", "*");
+                            context.Response.ContentLength64 = statusJson.Length;
+                            await context.Response.OutputStream.WriteAsync(statusJson, 0, statusJson.Length);
+                            context.Response.Close();
+                        }
+                        else if (context.Request.HttpMethod == "OPTIONS")
+                        {
+                            context.Response.StatusCode = 204;
+                            context.Response.Headers.Add("Access-Control-Allow-Origin", "*");
+                            context.Response.Headers.Add("Access-Control-Allow-Methods", "GET, OPTIONS");
+                            context.Response.Headers.Add("Access-Control-Allow-Headers", "*");
+                            context.Response.Close();
+                        }
+                        else
+                        {
+                            context.Response.StatusCode = 400;
+                            context.Response.Close();
+                        }
                         continue;
                     }
 
