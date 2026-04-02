@@ -129,12 +129,13 @@ namespace ClashControlConnector.Protocol
             });
         }
 
-        public static string SelectionChanged(List<string> globalIds)
+        public static string SelectionChanged(List<string> globalIds, List<long> revitIds)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "selection-changed",
-                globalIds
+                globalIds,
+                revitIds
             });
         }
 
@@ -153,6 +154,11 @@ namespace ClashControlConnector.Protocol
         public static string SessionExpired()
         {
             return JsonConvert.SerializeObject(new { type = "session-expired" });
+        }
+
+        public static string ModelSync()
+        {
+            return JsonConvert.SerializeObject(new { type = "model-sync" });
         }
     }
 }
