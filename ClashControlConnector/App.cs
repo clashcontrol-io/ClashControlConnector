@@ -114,12 +114,14 @@ namespace ClashControlConnector
                     {
                         _lastSelection = currentSelection;
                         var globalIds = new List<string>();
+                        var revitIds = new List<long>();
                         foreach (var eid in currentSelection)
                         {
+                            revitIds.Add(eid.Value);
                             var gid = _cache.FindByElementId(eid);
                             if (gid != null) globalIds.Add(gid);
                         }
-                        _ = _server.SendAsync(Messages.SelectionChanged(globalIds));
+                        _ = _server.SendAsync(Messages.SelectionChanged(globalIds, revitIds));
                     }
                 }
             }
@@ -754,21 +756,11 @@ namespace ClashControlConnector
         {
             if (!_server.IsClientConnected) return;
 
-            // Revit may fire additional DocumentChanged events AFTER this event.
-            // Schedule a delayed flush to catch trailing changes.
-            Task.Delay(2000).ContinueWith(_ =>
-            {
-                if (_debouncer.HasChanges)
-                {
-                    Debug.WriteLine("[CC] Post-sync flush — sending accumulated changes");
-                    _debouncer.Flush();
-                }
-            });
+            // Clear the debouncer — ClashControl will pull the updated model itself
+            _debouncer.Clear();
 
-            if (!_debouncer.HasChanges) return;
-
-            Debug.WriteLine("[CC] Sync with Central detected — flushing accumulated changes");
-            _debouncer.Flush();
+            Debug.WriteLine("[CC] Sync with Central detected — sending model-sync notification");
+            _ = _server.SendAsync(Messages.ModelSync());
         }
 
         private static void ProcessDebouncedChanges(
