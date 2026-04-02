@@ -30,6 +30,7 @@ namespace ClashControlConnector
         private static bool _lastKnownConnected;
         private static UIControlledApplication _uiApp;
         private static HashSet<BuiltInCategory> _allowedCategories;
+        private static HashSet<ElementId> _lastSelection = new HashSet<ElementId>();
 
         public static WsServer Server => _server;
         public static ElementCache Cache => _cache;
@@ -86,6 +87,27 @@ namespace ClashControlConnector
             {
                 _lastKnownConnected = connected;
                 UpdateButtonStatus(running, connected);
+            }
+
+            // Selection sync: check if selection changed since last idle
+            if (connected && ConnectorSettings.SyncSelection && sender is UIApplication uiApp)
+            {
+                var uidoc = uiApp.ActiveUIDocument;
+                if (uidoc != null)
+                {
+                    var currentSelection = new HashSet<ElementId>(uidoc.Selection.GetElementIds());
+                    if (!currentSelection.SetEquals(_lastSelection))
+                    {
+                        _lastSelection = currentSelection;
+                        var globalIds = new List<string>();
+                        foreach (var eid in currentSelection)
+                        {
+                            var gid = _cache.FindByElementId(eid);
+                            if (gid != null) globalIds.Add(gid);
+                        }
+                        _ = _server.SendAsync(Messages.SelectionChanged(globalIds));
+                    }
+                }
             }
         }
 
@@ -169,6 +191,7 @@ namespace ClashControlConnector
             _highlightedElementIds.Clear();
             _debouncer?.Clear();
             _allowedCategories = null;
+            _lastSelection.Clear();
 
             _lastKnownConnected = false;
             UpdateButtonStatus(false, false);
@@ -215,6 +238,18 @@ namespace ClashControlConnector
 
                     case "clear-highlights":
                         RevitCommandHandler.Enqueue(app => ClearAllHighlights(app));
+                        break;
+
+                    case "camera-sync":
+                        if (ConnectorSettings.SyncCamera)
+                        {
+                            var pos = msg["position"]?.ToObject<double[]>();
+                            var tgt = msg["target"]?.ToObject<double[]>();
+                            var up = msg["up"]?.ToObject<double[]>();
+                            var fov = msg["fov"]?.ToObject<double>() ?? 60;
+                            if (pos != null && tgt != null)
+                                RevitCommandHandler.Enqueue(app => ApplyCameraFromBrowser(app, pos, tgt, up, fov));
+                        }
                         break;
 
                     case "push-clashes":
@@ -548,6 +583,59 @@ namespace ClashControlConnector
                 .OfClass(typeof(FillPatternElement))
                 .Cast<FillPatternElement>()
                 .FirstOrDefault(fp => fp.GetFillPattern().IsSolidFill);
+        }
+
+        #endregion
+
+        #region Camera Sync
+
+        private static void ApplyCameraFromBrowser(UIApplication uiApp, double[] pos, double[] tgt, double[] up, double fov)
+        {
+            var uidoc = uiApp.ActiveUIDocument;
+            if (uidoc == null) return;
+            var view = uidoc.ActiveView as View3D;
+            if (view == null) return;
+
+            // Convert from ClashControl meters/Y-up to Revit feet/Z-up
+            var eyePoint = new XYZ(pos[0] / 0.3048, -pos[2] / 0.3048, pos[1] / 0.3048);
+            var targetPoint = new XYZ(tgt[0] / 0.3048, -tgt[2] / 0.3048, tgt[1] / 0.3048);
+            var upDir = up != null
+                ? new XYZ(up[0], -up[2], up[1])
+                : XYZ.BasisZ;
+
+            var forward = (targetPoint - eyePoint).Normalize();
+
+            using (var t = new Transaction(uidoc.Document, "ClashControl: Camera Sync"))
+            {
+                t.Start();
+                view.SetOrientation(new ViewOrientation3D(eyePoint, upDir, forward));
+                t.Commit();
+            }
+        }
+
+        /// <summary>
+        /// Send the current Revit 3D view camera to ClashControl.
+        /// Called from OnIdling when camera sync is enabled.
+        /// </summary>
+        private static void SendCameraToClashControl(UIApplication uiApp)
+        {
+            var view = uiApp.ActiveUIDocument?.ActiveView as View3D;
+            if (view == null) return;
+
+            var orientation = view.GetOrientation();
+            var eye = orientation.EyePosition;
+            var forward = orientation.ForwardDirection;
+            var upDir = orientation.UpDirection;
+
+            // Approximate target as eye + forward * reasonable distance
+            var target = eye + forward * 100;
+
+            // Convert from Revit feet/Z-up to ClashControl meters/Y-up
+            var position = new[] { eye.X * 0.3048, eye.Z * 0.3048, -eye.Y * 0.3048 };
+            var tgt = new[] { target.X * 0.3048, target.Z * 0.3048, -target.Y * 0.3048 };
+            var up = new[] { upDir.X, upDir.Z, -upDir.Y };
+
+            _ = _server.SendAsync(Messages.CameraSync(position, tgt, up, 60));
         }
 
         #endregion

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Autodesk.Revit.DB;
 
 namespace ClashControlConnector.Core
 {
@@ -23,5 +24,21 @@ namespace ClashControlConnector.Core
         /// Any other value = interval in seconds.
         /// </summary>
         public static int RefreshIntervalSeconds { get; set; } = 0;
+
+        /// <summary>
+        /// Geometry detail level for export. Medium is a good balance
+        /// between triangle count and visual fidelity for clash detection.
+        /// </summary>
+        public static ViewDetailLevel DetailLevel { get; set; } = ViewDetailLevel.Medium;
+
+        /// <summary>
+        /// Whether to sync element selection from Revit to ClashControl.
+        /// </summary>
+        public static bool SyncSelection { get; set; }
+
+        /// <summary>
+        /// Whether to sync camera position between Revit and ClashControl.
+        /// </summary>
+        public static bool SyncCamera { get; set; }
     }
 }

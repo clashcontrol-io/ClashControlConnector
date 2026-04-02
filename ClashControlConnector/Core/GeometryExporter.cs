@@ -19,8 +19,8 @@ namespace ClashControlConnector.Core
 
             var options = new Options
             {
-                ComputeReferences = true,
-                DetailLevel = ViewDetailLevel.Fine
+                ComputeReferences = false,
+                DetailLevel = ConnectorSettings.DetailLevel
             };
 
             var geomElement = element.get_Geometry(options);

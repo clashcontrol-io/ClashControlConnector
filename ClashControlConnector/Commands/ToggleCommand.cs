@@ -73,11 +73,21 @@ namespace ClashControlConnector.Commands
             }
         }
 
+        private static readonly Autodesk.Revit.DB.ViewDetailLevel[] DetailLevels =
+        {
+            Autodesk.Revit.DB.ViewDetailLevel.Coarse,
+            Autodesk.Revit.DB.ViewDetailLevel.Medium,
+            Autodesk.Revit.DB.ViewDetailLevel.Fine,
+        };
+
         private static void ApplySettings(ConnectorSettingsForm form)
         {
             ConnectorSettings.SelectedCategories = form.SelectedCategories;
             ConnectorSettings.IncludeLinkedModels = form.IncludeLinkedModels;
             ConnectorSettings.RefreshIntervalSeconds = form.RefreshIntervalSeconds;
+            ConnectorSettings.DetailLevel = DetailLevels[form.DetailLevelIndex];
+            ConnectorSettings.SyncSelection = form.SyncSelection;
+            ConnectorSettings.SyncCamera = form.SyncCamera;
             App.InvalidateAllowedCategories();
         }
     }

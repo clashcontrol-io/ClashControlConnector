@@ -121,5 +121,31 @@ namespace ClashControlConnector.Protocol
                 errors
             });
         }
+
+        public static string SelectionChanged(List<string> globalIds)
+        {
+            return JsonConvert.SerializeObject(new
+            {
+                type = "selection-changed",
+                globalIds
+            });
+        }
+
+        public static string CameraSync(double[] position, double[] target, double[] up, double fov)
+        {
+            return JsonConvert.SerializeObject(new
+            {
+                type = "camera-sync",
+                position,
+                target,
+                up,
+                fov
+            });
+        }
+
+        public static string SessionExpired()
+        {
+            return JsonConvert.SerializeObject(new { type = "session-expired" });
+        }
     }
 }
