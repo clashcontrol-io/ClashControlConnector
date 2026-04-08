@@ -24,21 +24,38 @@ namespace ClashControlConnector.Protocol
             });
         }
 
-        public static string ModelStart(string name, int elementCount)
+        public static string ExportStart(int totalModels, int totalElements, string projectId = null)
+        {
+            return JsonConvert.SerializeObject(new
+            {
+                type = "export-start",
+                totalModels,
+                totalElements,
+                projectId
+            });
+        }
+
+        public static string ModelStart(string modelId, string name, int elementCount, int modelIndex, int totalModels, bool isLinked, string projectId = null)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "model-start",
+                modelId,
                 name,
-                elementCount
+                elementCount,
+                modelIndex,
+                totalModels,
+                isLinked,
+                projectId
             });
         }
 
-        public static string ElementBatch(int batchIndex, int totalBatches, List<ElementData> elements, string projectId = null)
+        public static string ElementBatch(string modelId, int batchIndex, int totalBatches, List<ElementData> elements, string projectId = null)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "element-batch",
+                modelId,
                 batchIndex,
                 totalBatches,
                 elements,
@@ -46,15 +63,25 @@ namespace ClashControlConnector.Protocol
             });
         }
 
-        public static string ModelEnd(List<string> storeys, List<object> storeyData, Dictionary<string, bool> relatedPairs, List<string> unchanged = null, string projectId = null)
+        public static string ModelEnd(string modelId, List<string> storeys, List<object> storeyData, Dictionary<string, bool> relatedPairs, List<string> unchanged = null, string projectId = null)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "model-end",
+                modelId,
                 storeys,
                 storeyData,
                 relatedPairs,
                 unchanged,
+                projectId
+            });
+        }
+
+        public static string ExportEnd(string projectId = null)
+        {
+            return JsonConvert.SerializeObject(new
+            {
+                type = "export-end",
                 projectId
             });
         }
@@ -69,34 +96,37 @@ namespace ClashControlConnector.Protocol
             });
         }
 
-        public static string ElementUpdateModified(List<ElementData> elements, string projectId = null)
+        public static string ElementUpdateModified(string modelId, List<ElementData> elements, string projectId = null)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "element-update",
                 action = "modified",
+                modelId,
                 elements,
                 projectId
             });
         }
 
-        public static string ElementUpdatePropertiesOnly(List<ElementData> elements, string projectId = null)
+        public static string ElementUpdatePropertiesOnly(string modelId, List<ElementData> elements, string projectId = null)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "element-update",
                 action = "properties-only",
+                modelId,
                 elements,
                 projectId
             });
         }
 
-        public static string ElementUpdateDeleted(List<string> globalIds, List<long> revitIds, string projectId = null)
+        public static string ElementUpdateDeleted(string modelId, List<string> globalIds, List<long> revitIds, string projectId = null)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "element-update",
                 action = "deleted",
+                modelId,
                 globalIds,
                 revitIds,
                 projectId

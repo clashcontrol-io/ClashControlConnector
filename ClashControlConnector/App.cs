@@ -34,6 +34,11 @@ namespace ClashControlConnector
         private static bool _lastKnownConnected;
         private static UIControlledApplication _uiApp;
         private static HashSet<BuiltInCategory> _allowedCategories;
+        // DocKey of the host Revit document from the most recent export.
+        // Used to filter DocumentChanged events so that edits in unrelated
+        // open docs (including linked models opened as main docs elsewhere)
+        // do not pollute live updates for the current session.
+        private static string _hostDocKey;
         private static HashSet<ElementId> _lastSelection = new HashSet<ElementId>();
         private static double[] _lastCameraEye;
         private static DateTime _lastCameraSendTime = DateTime.MinValue;
@@ -115,10 +120,11 @@ namespace ClashControlConnector
                         _lastSelection = currentSelection;
                         var globalIds = new List<string>();
                         var revitIds = new List<long>();
+                        var selDoc = uidoc.Document;
                         foreach (var eid in currentSelection)
                         {
                             revitIds.Add(eid.Value);
-                            var gid = _cache.FindByElementId(eid);
+                            var gid = _cache.FindByElementId(selDoc, eid);
                             if (gid != null) globalIds.Add(gid);
                         }
                         _ = _server.SendAsync(Messages.SelectionChanged(globalIds, revitIds));
@@ -239,6 +245,7 @@ namespace ClashControlConnector
             _lastSelection.Clear();
             _activeProjectId = null;
             _lastCameraEye = null;
+            _hostDocKey = null;
 
             _lastKnownConnected = false;
             UpdateButtonStatus(false, false);
@@ -324,24 +331,42 @@ namespace ClashControlConnector
         #region Export
 
         /// <summary>
+        /// One linked or host Revit document being exported as a separate
+        /// ClashControl model. Each ModelInfo gets its own model-start /
+        /// element-batch / model-end sequence.
+        /// </summary>
+        private class ModelInfo
+        {
+            public string ModelId;        // Stable id sent to ClashControl
+            public string ModelName;      // Display name (e.g. "Architecture.rvt")
+            public Document Doc;          // Revit document (host or linked)
+            public bool IsLinked;
+            public List<Element> Elements = new List<Element>();
+
+            // Per-model progress
+            public int ElementIndex;
+            public long ExpressId;
+            public int ElementsSent;
+            public bool StartSent;
+            public List<ElementData> PendingData = new List<ElementData>();
+            public List<string> UnchangedGlobalIds = new List<string>();
+        }
+
+        /// <summary>
         /// Holds state for a chunked export that processes elements across
         /// multiple ExternalEvent callbacks to keep Revit responsive.
+        /// Each linked Revit model is exported as a separate ClashControl
+        /// model so they can be clashed independently.
         /// </summary>
         private class ExportState
         {
-            public Document Doc;
-            public List<List<Element>> ModelBatches = new List<List<Element>>();
+            public List<ModelInfo> Models = new List<ModelInfo>();
             public Dictionary<string, string> KnownElements;
             public bool IsDeltaExport;
             public CancellationToken Ct;
 
             public int ModelIndex;
-            public int ElementIndex;
-            public long ExpressId;
-            public int ElementsSent;
             public int TotalElements;
-            public List<string> UnchangedGlobalIds = new List<string>();
-            public List<ElementData> PendingData = new List<ElementData>();
         }
 
         private static void ExportModel(UIApplication uiApp, Dictionary<string, string> knownElements = null, string projectId = null)
@@ -371,18 +396,29 @@ namespace ClashControlConnector
             var allowed = GetAllowedCategories();
             var state = new ExportState
             {
-                Doc = doc,
                 KnownElements = knownElements,
                 IsDeltaExport = isDeltaExport,
                 Ct = _exportCts.Token
             };
 
-            var hostElements = CollectExportableElements(doc, allowed);
-            state.ModelBatches.Add(hostElements);
-            state.TotalElements = hostElements.Count;
-            Debug.WriteLine($"[CC] Host model '{doc.Title}': {hostElements.Count} elements");
+            // Remember which doc is "host" for live-update filtering.
+            _hostDocKey = ElementCache.GetDocKey(doc);
 
-            // Queue linked models to be collected and sent one at a time
+            // Host model — always present, always first
+            var hostInfo = new ModelInfo
+            {
+                ModelId = BuildHostModelId(doc),
+                ModelName = (doc.Title ?? "Host") + ".rvt",
+                Doc = doc,
+                IsLinked = false,
+                Elements = CollectExportableElements(doc, allowed)
+            };
+            state.Models.Add(hostInfo);
+            state.TotalElements += hostInfo.Elements.Count;
+            Debug.WriteLine($"[CC] Host model '{hostInfo.ModelName}' ({hostInfo.ModelId}): {hostInfo.Elements.Count} elements");
+
+            // Linked models — each becomes its own ClashControl model so
+            // ClashControl can clash them independently.
             if (ConnectorSettings.IncludeLinkedModels)
             {
                 var linkInstances = new FilteredElementCollector(doc)
@@ -390,57 +426,128 @@ namespace ClashControlConnector
                     .Cast<RevitLinkInstance>()
                     .ToList();
 
+                // Track how many instances share the same linked Document so
+                // we can disambiguate the display name (e.g. "Arch.rvt (2)").
+                var nameCounts = new Dictionary<string, int>();
+
                 foreach (var linkInst in linkInstances)
                 {
-                    var linkDoc = linkInst.GetLinkDocument();
-                    if (linkDoc == null) continue;
+                    Document linkDoc = null;
+                    try { linkDoc = linkInst.GetLinkDocument(); }
+                    catch { /* unloaded / not found */ }
+                    if (linkDoc == null)
+                    {
+                        Debug.WriteLine($"[CC] Skipping unloaded link: {linkInst.Name}");
+                        continue;
+                    }
 
                     try
                     {
                         var linkElements = CollectExportableElements(linkDoc, allowed);
-                        state.ModelBatches.Add(linkElements);
+                        var baseName = (linkDoc.Title ?? "Linked") + ".rvt";
+                        nameCounts.TryGetValue(baseName, out var seen);
+                        nameCounts[baseName] = seen + 1;
+                        var displayName = seen == 0 ? baseName : $"{baseName} ({seen + 1})";
+
+                        var linkInfo = new ModelInfo
+                        {
+                            ModelId = BuildLinkedModelId(linkInst, linkDoc),
+                            ModelName = displayName,
+                            Doc = linkDoc,
+                            IsLinked = true,
+                            Elements = linkElements
+                        };
+                        state.Models.Add(linkInfo);
                         state.TotalElements += linkElements.Count;
-                        Debug.WriteLine($"[CC] Linked model '{linkDoc.Title}': {linkElements.Count} elements");
+                        Debug.WriteLine($"[CC] Linked model '{linkInfo.ModelName}' ({linkInfo.ModelId}): {linkElements.Count} elements");
                     }
                     catch (Exception ex)
                     {
-                        Debug.WriteLine($"[CC] Error reading linked model: {ex.Message}");
+                        Debug.WriteLine($"[CC] Error reading linked model '{linkInst.Name}': {ex.Message}");
                     }
                 }
             }
 
-            _ = _server.SendAsync(Messages.ModelStart(doc.Title + ".rvt", state.TotalElements));
+            // Announce the whole export so ClashControl can prepare N model slots.
+            _ = _server.SendAsync(Messages.ExportStart(state.Models.Count, state.TotalElements, _activeProjectId));
 
             // Start chunked processing
             ProcessExportChunk(state);
+        }
+
+        /// <summary>
+        /// Stable identifier for the host Revit document. Derived from the
+        /// document path (or title if unsaved) so repeated exports of the
+        /// same project produce the same modelId.
+        /// </summary>
+        private static string BuildHostModelId(Document doc)
+        {
+            var key = !string.IsNullOrEmpty(doc?.PathName) ? doc.PathName : (doc?.Title ?? "host");
+            return "host:" + key;
+        }
+
+        /// <summary>
+        /// Stable identifier for a linked Revit model. Uses the RevitLinkInstance
+        /// UniqueId so two separate instances of the same linked file (copies at
+        /// different locations) still appear as distinct models in ClashControl.
+        /// </summary>
+        private static string BuildLinkedModelId(RevitLinkInstance linkInst, Document linkDoc)
+        {
+            var instPart = linkInst?.UniqueId ?? "unknown-instance";
+            var docPart = !string.IsNullOrEmpty(linkDoc?.PathName) ? linkDoc.PathName : (linkDoc?.Title ?? "link");
+            return "link:" + instPart + "|" + docPart;
         }
 
         private static void ProcessExportChunk(ExportState state)
         {
             if (state.Ct.IsCancellationRequested)
             {
-                _ = _server.SendAsync(Messages.ExportCancelled(state.ElementsSent));
+                int sentSoFar = 0;
+                foreach (var m in state.Models) sentSoFar += m.ElementsSent;
+                _ = _server.SendAsync(Messages.ExportCancelled(sentSoFar));
                 return;
             }
 
             RevitCommandHandler.Enqueue(app =>
             {
-                var doc = app.ActiveUIDocument?.Document;
-                if (doc == null || !_server.IsClientConnected) return;
+                if (!_server.IsClientConnected) return;
+                if (state.ModelIndex >= state.Models.Count)
+                {
+                    FinishExport(state);
+                    return;
+                }
 
-                int chunkSize = 25;
-                int batchSize = 50;
-                var elements = state.ModelBatches[state.ModelIndex];
-                int end = Math.Min(state.ElementIndex + chunkSize, elements.Count);
+                const int chunkSize = 25;
+                const int batchSize = 50;
 
-                for (int i = state.ElementIndex; i < end; i++)
+                var model = state.Models[state.ModelIndex];
+
+                // Emit model-start the first time we touch this model.
+                if (!model.StartSent)
+                {
+                    _ = _server.SendAsync(Messages.ModelStart(
+                        model.ModelId,
+                        model.ModelName,
+                        model.Elements.Count,
+                        state.ModelIndex,
+                        state.Models.Count,
+                        model.IsLinked,
+                        _activeProjectId));
+                    model.StartSent = true;
+                }
+
+                int end = Math.Min(model.ElementIndex + chunkSize, model.Elements.Count);
+
+                for (int i = model.ElementIndex; i < end; i++)
                 {
                     try
                     {
-                        var el = elements[i];
-                        var elDoc = el.Document ?? doc;
+                        var el = model.Elements[i];
+                        var elDoc = el.Document ?? model.Doc;
                         var data = PropertyExporter.ExtractProperties(el, elDoc);
-                        data.ExpressId = ++state.ExpressId;
+                        data.ExpressId = ++model.ExpressId;
+                        data.ModelId = model.ModelId;
+                        data.ModelName = model.ModelName;
                         data.Geometry = GeometryExporter.ExtractGeometry(el);
                         if (data.Geometry == null)
                             data.Geometry = new ElementGeometry();
@@ -452,81 +559,86 @@ namespace ClashControlConnector
                             && state.KnownElements.TryGetValue(data.GlobalId, out var browserHash)
                             && browserHash == contentHash)
                         {
-                            state.UnchangedGlobalIds.Add(data.GlobalId);
+                            model.UnchangedGlobalIds.Add(data.GlobalId);
                             int geomHash = (data.Geometry.Positions ?? "").GetHashCode();
-                            _cache.Add(data.GlobalId, el.Id, geomHash);
+                            _cache.Add(data.GlobalId, elDoc, el.Id, model.ModelId, model.ModelName, geomHash);
                             _cache.SetContentHash(data.GlobalId, contentHash);
                             continue;
                         }
 
                         int gh = (data.Geometry.Positions ?? "").GetHashCode();
-                        _cache.Add(data.GlobalId, el.Id, gh);
+                        _cache.Add(data.GlobalId, elDoc, el.Id, model.ModelId, model.ModelName, gh);
                         _cache.SetContentHash(data.GlobalId, contentHash);
-                        state.PendingData.Add(data);
+                        model.PendingData.Add(data);
                     }
                     catch (Exception ex)
                     {
-                        Debug.WriteLine($"[CC] Skip element {elements[i].Id}: {ex.Message}");
+                        Debug.WriteLine($"[CC] Skip element {model.Elements[i].Id}: {ex.Message}");
                     }
                 }
 
-                state.ElementIndex = end;
+                model.ElementIndex = end;
 
-                // Send any full batches
-                int totalBatches = (int)Math.Ceiling(state.TotalElements / (double)batchSize);
-                while (state.PendingData.Count >= batchSize)
+                // Flush any full batches for the current model.
+                int totalBatches = Math.Max(1, (int)Math.Ceiling(model.Elements.Count / (double)batchSize));
+                while (model.PendingData.Count >= batchSize)
                 {
-                    var batch = state.PendingData.GetRange(0, batchSize);
-                    state.PendingData.RemoveRange(0, batchSize);
-                    int batchIdx = state.ElementsSent / batchSize;
-                    _ = _server.SendAsync(Messages.ElementBatch(batchIdx, totalBatches, batch, _activeProjectId));
-                    state.ElementsSent += batch.Count;
+                    var batch = model.PendingData.GetRange(0, batchSize);
+                    model.PendingData.RemoveRange(0, batchSize);
+                    int batchIdx = model.ElementsSent / batchSize;
+                    _ = _server.SendAsync(Messages.ElementBatch(model.ModelId, batchIdx, totalBatches, batch, _activeProjectId));
+                    model.ElementsSent += batch.Count;
                 }
 
-                // Check if current model is done
-                if (state.ElementIndex >= elements.Count)
+                // Finished the current model?
+                if (model.ElementIndex >= model.Elements.Count)
                 {
+                    FinishModel(state, model);
                     state.ModelIndex++;
-                    state.ElementIndex = 0;
                 }
 
-                if (state.ModelIndex < state.ModelBatches.Count)
+                if (state.ModelIndex < state.Models.Count)
                 {
-                    // More models/elements to process — yield and continue
+                    // More models to process — yield and continue.
                     ProcessExportChunk(state);
                 }
                 else
                 {
-                    // All models done — send remaining and finish
-                    FinishExport(app, state);
+                    // All models done.
+                    FinishExport(state);
                 }
             });
         }
 
-        private static void FinishExport(UIApplication uiApp, ExportState state)
+        /// <summary>
+        /// Flush the final batch for a single model and emit its model-end,
+        /// including storeys and host/child relationships scoped to that model.
+        /// </summary>
+        private static void FinishModel(ExportState state, ModelInfo model)
         {
-            int batchSize = 50;
+            const int batchSize = 50;
 
-            // Send any remaining elements as a final batch
-            if (state.PendingData.Count > 0)
+            // Flush any remaining elements for this model.
+            if (model.PendingData.Count > 0)
             {
-                int totalBatches = (int)Math.Ceiling(state.TotalElements / (double)batchSize);
-                int batchIdx = state.ElementsSent / batchSize;
-                _ = _server.SendAsync(Messages.ElementBatch(batchIdx, Math.Max(totalBatches, batchIdx + 1), state.PendingData, _activeProjectId));
-                state.ElementsSent += state.PendingData.Count;
+                int totalBatches = Math.Max(1, (int)Math.Ceiling(model.Elements.Count / (double)batchSize));
+                int batchIdx = model.ElementsSent / batchSize;
+                _ = _server.SendAsync(Messages.ElementBatch(
+                    model.ModelId,
+                    batchIdx,
+                    Math.Max(totalBatches, batchIdx + 1),
+                    model.PendingData,
+                    _activeProjectId));
+                model.ElementsSent += model.PendingData.Count;
+                model.PendingData.Clear();
             }
 
-            // Gather all elements for relationship building
-            var allElements = new List<Element>();
-            foreach (var batch in state.ModelBatches)
-                allElements.AddRange(batch);
+            // Relationships live inside a single document, so build per-model.
+            var (_, _, relatedPairs) =
+                RelationshipExporter.BuildRelationships(model.Elements, model.Doc, _cache);
 
-            // Build relationships using the now-populated cache
-            var (hostIds, hostRelationships, relatedPairs) =
-                RelationshipExporter.BuildRelationships(allElements, state.Doc, _cache);
-
-            // Collect storeys
-            var levels = new FilteredElementCollector(state.Doc)
+            // Collect storeys from this model's document only.
+            var levels = new FilteredElementCollector(model.Doc)
                 .OfClass(typeof(Level))
                 .Cast<Level>()
                 .OrderBy(l => l.Elevation)
@@ -539,12 +651,29 @@ namespace ClashControlConnector
                 elevation = Math.Round(l.Elevation * 304.8, 1)
             }).ToList();
 
-            var unchanged = state.IsDeltaExport && state.UnchangedGlobalIds.Count > 0
-                ? state.UnchangedGlobalIds : null;
-            _ = _server.SendAsync(Messages.ModelEnd(storeys, storeyData, relatedPairs, unchanged, _activeProjectId));
+            var unchanged = state.IsDeltaExport && model.UnchangedGlobalIds.Count > 0
+                ? model.UnchangedGlobalIds : null;
+
+            _ = _server.SendAsync(Messages.ModelEnd(
+                model.ModelId,
+                storeys,
+                storeyData,
+                relatedPairs,
+                unchanged,
+                _activeProjectId));
 
             if (state.IsDeltaExport)
-                Debug.WriteLine($"[CC] Delta export: {state.ElementsSent} changed, {state.UnchangedGlobalIds.Count} unchanged");
+                Debug.WriteLine($"[CC] Delta model '{model.ModelName}': {model.ElementsSent} changed, {model.UnchangedGlobalIds.Count} unchanged");
+        }
+
+        private static void FinishExport(ExportState state)
+        {
+            int totalSent = 0;
+            foreach (var m in state.Models) totalSent += m.ElementsSent;
+
+            _ = _server.SendAsync(Messages.ExportEnd(_activeProjectId));
+
+            Debug.WriteLine($"[CC] Export complete: {state.Models.Count} model(s), {totalSent} elements sent");
         }
 
         private static void HandleResumeSession(UIApplication uiApp, Dictionary<string, string> knownElements)
@@ -613,12 +742,18 @@ namespace ClashControlConnector
 
             ClearAllHighlights(uiApp);
 
-            // Resolve GlobalIds to ElementIds via cache (O(1) per lookup)
+            // Resolve GlobalIds to ElementIds via cache (O(1) per lookup).
+            // Elements from linked models cannot be highlighted directly in
+            // the host view, so we only collect entries that belong to the
+            // active document.
+            var hostDocKey = ElementCache.GetDocKey(doc);
             var elementIds = new List<ElementId>();
             foreach (var gid in globalIds)
             {
-                var eid = _cache.FindByGlobalId(gid);
-                if (eid != null) elementIds.Add(eid);
+                var entry = _cache.FindByGlobalId(gid);
+                if (entry == null) continue;
+                if (entry.DocKey != hostDocKey) continue;
+                elementIds.Add(new ElementId(entry.ElementIdValue));
             }
 
             if (elementIds.Count == 0) return;
@@ -808,6 +943,17 @@ namespace ClashControlConnector
         {
             if (!_server.IsClientConnected) return;
 
+            // Only accept edits from the host document that was exported for
+            // this session. ElementIds are only unique within a single
+            // document, so mixing events from other docs (e.g. a linked Revit
+            // model opened as a main doc in another tab) would corrupt lookups.
+            // Linked models inside the host doc are refreshed via full
+            // re-export on reload, not via live updates.
+            if (_hostDocKey == null) return;
+            var changedDoc = e.GetDocument();
+            if (changedDoc == null) return;
+            if (ElementCache.GetDocKey(changedDoc) != _hostDocKey) return;
+
             _debouncer.Add(
                 e.GetModifiedElementIds(),
                 e.GetAddedElementIds(),
@@ -834,6 +980,13 @@ namespace ClashControlConnector
                 var doc = app.ActiveUIDocument?.Document;
                 if (doc == null || !_server.IsClientConnected) return;
 
+                // Live updates are scoped to the active (host) document. Linked
+                // Revit models are exported as separate ClashControl models but
+                // only refresh on full re-export / reload, since Revit doesn't
+                // surface live edits to link contents from inside the host doc.
+                var hostModelId = BuildHostModelId(doc);
+                var hostModelName = (doc.Title ?? "Host") + ".rvt";
+
                 // Handle deletions — resolve GlobalIds from cache
                 if (deleted.Count > 0)
                 {
@@ -842,13 +995,13 @@ namespace ClashControlConnector
 
                     foreach (var eid in deleted)
                     {
-                        var gid = _cache.FindByElementId(eid);
+                        var gid = _cache.FindByElementId(doc, eid);
                         if (gid != null) deletedGids.Add(gid);
                         deletedRevitIds.Add(eid.Value);
-                        _cache.Remove(eid);
+                        _cache.Remove(doc, eid);
                     }
 
-                    _ = _server.SendAsync(Messages.ElementUpdateDeleted(deletedGids, deletedRevitIds, _activeProjectId));
+                    _ = _server.SendAsync(Messages.ElementUpdateDeleted(hostModelId, deletedGids, deletedRevitIds, _activeProjectId));
                 }
 
                 var addedElements = new List<Element>();
@@ -866,7 +1019,7 @@ namespace ClashControlConnector
                 foreach (var eid in modified)
                 {
                     // Skip elements not in cache (internal Revit types, views, etc.)
-                    if (_cache.FindByElementId(eid) == null) continue;
+                    if (_cache.FindByElementId(doc, eid) == null) continue;
 
                     var el = doc.GetElement(eid);
                     if (el?.Category == null || IsSkippedCategory(el.Category)) continue;
@@ -883,10 +1036,12 @@ namespace ClashControlConnector
                         try
                         {
                             var data = PropertyExporter.ExtractProperties(el, doc);
+                            data.ModelId = hostModelId;
+                            data.ModelName = hostModelName;
                             data.Geometry = GeometryExporter.ExtractGeometry(el);
                             if (data.Geometry == null) data.Geometry = new ElementGeometry();
                             data.Geometry.Color = GetElementColor(el, doc);
-                            _cache.Add(data.GlobalId, el.Id, (data.Geometry.Positions ?? "").GetHashCode());
+                            _cache.Add(data.GlobalId, doc, el.Id, hostModelId, hostModelName, (data.Geometry.Positions ?? "").GetHashCode());
                             batch.Add(data);
                         }
                         catch (Exception ex)
@@ -896,7 +1051,7 @@ namespace ClashControlConnector
                     }
 
                     if (batch.Count > 0)
-                        _ = _server.SendAsync(Messages.ElementUpdateModified(batch, _activeProjectId));
+                        _ = _server.SendAsync(Messages.ElementUpdateModified(hostModelId, batch, _activeProjectId));
                 }
 
                 // Modified elements: check if geometry actually changed
@@ -910,23 +1065,25 @@ namespace ClashControlConnector
                         try
                         {
                             var data = PropertyExporter.ExtractProperties(el, doc);
+                            data.ModelId = hostModelId;
+                            data.ModelName = hostModelName;
                             var geom = GeometryExporter.ExtractGeometry(el);
                             if (geom == null) geom = new ElementGeometry();
                             geom.Color = GetElementColor(el, doc);
 
                             int newGeomHash = (geom.Positions ?? "").GetHashCode();
 
-                            if (_cache.HasGeometryChanged(el.Id, newGeomHash))
+                            if (_cache.HasGeometryChanged(data.GlobalId, newGeomHash))
                             {
                                 // Geometry changed — full update
                                 data.Geometry = geom;
-                                _cache.Add(data.GlobalId, el.Id, newGeomHash);
+                                _cache.Add(data.GlobalId, doc, el.Id, hostModelId, hostModelName, newGeomHash);
                                 geometryBatch.Add(data);
                             }
                             else
                             {
                                 // Only properties changed — skip geometry payload
-                                _cache.UpdateGeometryHash(el.Id, newGeomHash);
+                                _cache.UpdateGeometryHash(data.GlobalId, newGeomHash);
                                 propertiesBatch.Add(data);
                             }
                         }
@@ -937,9 +1094,9 @@ namespace ClashControlConnector
                     }
 
                     if (geometryBatch.Count > 0)
-                        _ = _server.SendAsync(Messages.ElementUpdateModified(geometryBatch, _activeProjectId));
+                        _ = _server.SendAsync(Messages.ElementUpdateModified(hostModelId, geometryBatch, _activeProjectId));
                     if (propertiesBatch.Count > 0)
-                        _ = _server.SendAsync(Messages.ElementUpdatePropertiesOnly(propertiesBatch, _activeProjectId));
+                        _ = _server.SendAsync(Messages.ElementUpdatePropertiesOnly(hostModelId, propertiesBatch, _activeProjectId));
                 }
 
             });
@@ -948,6 +1105,7 @@ namespace ClashControlConnector
         private static void OnDocumentOpened(object sender, DocumentOpenedEventArgs e)
         {
             _cache.Clear();
+            _hostDocKey = null;
             if (!_server.IsClientConnected) return;
             _ = _server.SendAsync(Messages.Status(true, e.Document.Title + ".rvt"));
         }
@@ -955,6 +1113,7 @@ namespace ClashControlConnector
         private static void OnDocumentClosing(object sender, DocumentClosingEventArgs e)
         {
             _cache.Clear();
+            _hostDocKey = null;
             _highlightedElementIds.Clear();
             if (!_server.IsClientConnected) return;
             _ = _server.SendAsync(Messages.Status(true, ""));

@@ -6,7 +6,8 @@ namespace ClashControlConnector.Core
     /// <summary>
     /// Builds host/child relationships for clash suppression.
     /// ClashControl suppresses clashes between a host element and its children
-    /// (e.g., a wall and its door).
+    /// (e.g., a wall and its door). Relationships only exist within a single
+    /// Revit document, so this is called once per model (host or linked).
     /// </summary>
     public static class RelationshipExporter
     {
@@ -26,8 +27,12 @@ namespace ClashControlConnector.Core
                 var host = fi.Host;
                 if (host == null) continue;
 
-                var hostGid = cache.FindByElementId(host.Id);
-                var childGid = cache.FindByElementId(fi.Id);
+                // Resolve via the element's own document — linked models have
+                // their own scope, and ElementIds are not unique across docs.
+                var elDoc = element.Document ?? doc;
+                var hostDoc = host.Document ?? doc;
+                var hostGid = cache.FindByElementId(hostDoc, host.Id);
+                var childGid = cache.FindByElementId(elDoc, fi.Id);
                 if (hostGid == null || childGid == null) continue;
 
                 hostIds[childGid] = hostGid;
