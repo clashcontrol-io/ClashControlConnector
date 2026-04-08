@@ -12,6 +12,8 @@ namespace ClashControlConnector.Protocol
         [JsonProperty("level")] public string Level { get; set; }
         [JsonProperty("type")] public string Type { get; set; }
         [JsonProperty("revitId")] public long RevitId { get; set; }
+        [JsonProperty("modelId")] public string ModelId { get; set; }
+        [JsonProperty("modelName", NullValueHandling = NullValueHandling.Ignore)] public string ModelName { get; set; }
         [JsonProperty("materials")] public List<string> Materials { get; set; }
         [JsonProperty("parameters")] public Dictionary<string, Dictionary<string, object>> Parameters { get; set; }
         [JsonProperty("hostId")] public string HostId { get; set; }

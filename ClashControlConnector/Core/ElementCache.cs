@@ -4,67 +4,111 @@ using Autodesk.Revit.DB;
 namespace ClashControlConnector.Core
 {
     /// <summary>
-    /// In-memory bidirectional lookup between GlobalIds and ElementIds.
+    /// In-memory bidirectional lookup between GlobalIds and (Document, ElementId).
     /// Populated during export, used for O(1) highlight/deletion lookups.
     /// Also stores geometry hashes for diffing during live updates
     /// and content hashes for content-addressable caching.
+    ///
+    /// Because linked Revit models are exported as separate ClashControl models,
+    /// the cache tracks which document each element originated from. ElementId
+    /// integer values are not unique across documents, so all lookups that start
+    /// from an ElementId must also supply a Document (or doc key).
     /// </summary>
     public class ElementCache
     {
-        private readonly Dictionary<string, ElementId> _globalIdToElementId = new Dictionary<string, ElementId>();
-        private readonly Dictionary<ElementId, string> _elementIdToGlobalId = new Dictionary<ElementId, string>();
-        private readonly Dictionary<ElementId, int> _geometryHashByElement = new Dictionary<ElementId, int>();
+        public class Entry
+        {
+            public string GlobalId;
+            public string DocKey;
+            public long ElementIdValue;
+            public string ModelId;
+            public string ModelName;
+            public int GeometryHash;
+        }
+
+        private readonly Dictionary<string, Entry> _byGlobalId = new Dictionary<string, Entry>();
+        // docKey -> (elementIdValue -> globalId)
+        private readonly Dictionary<string, Dictionary<long, string>> _byElementPerDoc = new Dictionary<string, Dictionary<long, string>>();
         private readonly Dictionary<string, string> _contentHashByGlobalId = new Dictionary<string, string>();
+
+        /// <summary>
+        /// A stable per-process key for a Revit Document. PathName is stable
+        /// for saved documents; falls back to Title for unsaved ones.
+        /// </summary>
+        public static string GetDocKey(Document doc)
+        {
+            if (doc == null) return "";
+            if (!string.IsNullOrEmpty(doc.PathName)) return doc.PathName;
+            return doc.Title ?? "";
+        }
 
         public void Clear()
         {
-            _globalIdToElementId.Clear();
-            _elementIdToGlobalId.Clear();
-            _geometryHashByElement.Clear();
+            _byGlobalId.Clear();
+            _byElementPerDoc.Clear();
             _contentHashByGlobalId.Clear();
         }
 
-        public void Add(string globalId, ElementId elementId, int geometryHash = 0)
+        public void Add(string globalId, Document doc, ElementId elementId, string modelId, string modelName, int geometryHash = 0)
         {
-            _globalIdToElementId[globalId] = elementId;
-            _elementIdToGlobalId[elementId] = globalId;
-            if (geometryHash != 0)
-                _geometryHashByElement[elementId] = geometryHash;
+            var docKey = GetDocKey(doc);
+            var entry = new Entry
+            {
+                GlobalId = globalId,
+                DocKey = docKey,
+                ElementIdValue = elementId.Value,
+                ModelId = modelId,
+                ModelName = modelName,
+                GeometryHash = geometryHash
+            };
+            _byGlobalId[globalId] = entry;
+
+            if (!_byElementPerDoc.TryGetValue(docKey, out var map))
+            {
+                map = new Dictionary<long, string>();
+                _byElementPerDoc[docKey] = map;
+            }
+            map[elementId.Value] = globalId;
         }
 
-        public void Remove(ElementId elementId)
+        public void Remove(Document doc, ElementId elementId)
         {
-            if (_elementIdToGlobalId.TryGetValue(elementId, out var gid))
+            var docKey = GetDocKey(doc);
+            if (_byElementPerDoc.TryGetValue(docKey, out var map)
+                && map.TryGetValue(elementId.Value, out var gid))
             {
-                _globalIdToElementId.Remove(gid);
-                _elementIdToGlobalId.Remove(elementId);
-                _geometryHashByElement.Remove(elementId);
+                map.Remove(elementId.Value);
+                _byGlobalId.Remove(gid);
                 _contentHashByGlobalId.Remove(gid);
             }
         }
 
-        public ElementId FindByGlobalId(string globalId)
+        public Entry FindByGlobalId(string globalId)
         {
-            _globalIdToElementId.TryGetValue(globalId, out var eid);
-            return eid;
+            _byGlobalId.TryGetValue(globalId, out var entry);
+            return entry;
         }
 
-        public string FindByElementId(ElementId elementId)
+        public string FindByElementId(Document doc, ElementId elementId)
         {
-            _elementIdToGlobalId.TryGetValue(elementId, out var gid);
-            return gid;
+            var docKey = GetDocKey(doc);
+            if (_byElementPerDoc.TryGetValue(docKey, out var map)
+                && map.TryGetValue(elementId.Value, out var gid))
+                return gid;
+            return null;
         }
 
-        public bool HasGeometryChanged(ElementId elementId, int newHash)
+        public bool HasGeometryChanged(string globalId, int newHash)
         {
-            if (!_geometryHashByElement.TryGetValue(elementId, out var oldHash))
+            if (!_byGlobalId.TryGetValue(globalId, out var entry))
                 return true;
-            return oldHash != newHash;
+            return entry.GeometryHash != newHash;
         }
 
-        public void UpdateGeometryHash(ElementId elementId, int newHash)
+        public void UpdateGeometryHash(string globalId, int newHash)
         {
-            _geometryHashByElement[elementId] = newHash;
+            if (_byGlobalId.TryGetValue(globalId, out var entry))
+                entry.GeometryHash = newHash;
         }
 
         public void SetContentHash(string globalId, string contentHash)
@@ -85,11 +129,11 @@ namespace ClashControlConnector.Core
 
         public List<string> GetAllGlobalIds()
         {
-            return new List<string>(_globalIdToElementId.Keys);
+            return new List<string>(_byGlobalId.Keys);
         }
 
-        public int Count => _globalIdToElementId.Count;
+        public int Count => _byGlobalId.Count;
 
-        public bool IsEmpty => _globalIdToElementId.Count == 0;
+        public bool IsEmpty => _byGlobalId.Count == 0;
     }
 }
