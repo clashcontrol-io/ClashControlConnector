@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ClashControl Connector — Revit 2024 build
+    =========================================
+    Revit 2024 is the last Revit version built on .NET Framework 4.8.
+    All shared source lives in ..\..\src and is pulled in via the Compile
+    globs below so every per-version project builds from exactly the same
+    code. Only this file (and the Revit reference paths) differs per year.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ClashControlConnector</RootNamespace>
+    <AssemblyName>ClashControlConnector</AssemblyName>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <UseWindowsForms>true</UseWindowsForms>
+    <DefineConstants>$(DefineConstants);REVIT2024</DefineConstants>
+    <RevitVersion>2024</RevitVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <!-- Revit API references for Revit 2024 -->
+  <ItemGroup>
+    <Reference Include="RevitAPI">
+      <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="RevitAPIUI">
+      <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPIUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Shared source files live in src/. Exclude any bin/obj in the shared dir. -->
+  <ItemGroup>
+    <Compile Remove="**\*.cs" />
+    <Compile Include="..\..\src\**\*.cs" Exclude="..\..\src\**\bin\**;..\..\src\**\obj\**" />
+    <EmbeddedResource Include="..\..\src\Resources\icon.png">
+      <Link>Resources\icon.png</Link>
+      <LogicalName>ClashControlConnector.Resources.icon.png</LogicalName>
+    </EmbeddedResource>
+    <None Include="..\..\src\ClashControlConnector.addin">
+      <Link>ClashControlConnector.addin</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

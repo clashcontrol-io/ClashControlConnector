@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ClashControl Connector — Revit 2026 build
+    =========================================
+    Revit 2026 continues the .NET 8 runtime that started with Revit 2025.
+    All shared source lives in ..\..\src and is pulled in via the Compile
+    globs below so every per-version project builds from exactly the same
+    code. Only this file (and the Revit reference paths) differs per year.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ClashControlConnector</RootNamespace>
+    <AssemblyName>ClashControlConnector</AssemblyName>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <UseWindowsForms>true</UseWindowsForms>
+    <DefineConstants>$(DefineConstants);REVIT2026</DefineConstants>
+    <RevitVersion>2026</RevitVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <!-- Revit API references for Revit 2026 -->
+  <ItemGroup>
+    <Reference Include="RevitAPI">
+      <HintPath>C:\Program Files\Autodesk\Revit 2026\RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="RevitAPIUI">
+      <HintPath>C:\Program Files\Autodesk\Revit 2026\RevitAPIUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Shared source files live in src/. Exclude any bin/obj in the shared dir. -->
+  <ItemGroup>
+    <Compile Remove="**\*.cs" />
+    <Compile Include="..\..\src\**\*.cs" Exclude="..\..\src\**\bin\**;..\..\src\**\obj\**" />
+    <EmbeddedResource Include="..\..\src\Resources\icon.png">
+      <Link>Resources\icon.png</Link>
+      <LogicalName>ClashControlConnector.Resources.icon.png</LogicalName>
+    </EmbeddedResource>
+    <None Include="..\..\src\ClashControlConnector.addin">
+      <Link>ClashControlConnector.addin</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
