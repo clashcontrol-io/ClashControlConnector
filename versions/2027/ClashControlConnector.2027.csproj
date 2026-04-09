@@ -26,8 +26,18 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
 
-  <!-- Revit API references for Revit 2027 -->
-  <ItemGroup>
+  <!--
+    Local builds (default) reference RevitAPI from the real Revit install.
+    CI builds pass -p:UseStubRevitApi=true to swap in Nice3point's stub
+    NuGet packages so the build needs no Revit install at all.
+
+    Note: at the time of writing the Nice3point stub package for Revit
+    2027 may not yet exist on NuGet. The build-installer GitHub Action
+    therefore tolerates failures of the 2027 step (see
+    .github/workflows/build-installer.yml). Once a 2027 stub is
+    published this should start passing automatically.
+  -->
+  <ItemGroup Condition="'$(UseStubRevitApi)' != 'true'">
     <Reference Include="RevitAPI">
       <HintPath>C:\Program Files\Autodesk\Revit 2027\RevitAPI.dll</HintPath>
       <Private>false</Private>
@@ -36,6 +46,11 @@
       <HintPath>C:\Program Files\Autodesk\Revit 2027\RevitAPIUI.dll</HintPath>
       <Private>false</Private>
     </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseStubRevitApi)' == 'true'">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI"   Version="2027.0.0" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2027.0.0" />
   </ItemGroup>
 
   <!-- Shared source files live in src/. Exclude any bin/obj in the shared dir. -->

@@ -1,0 +1,139 @@
+name: Build installer
+
+# Builds ClashControlConnectorInstaller.exe on a stock Windows runner
+# without needing any Revit installs. The per-version csproj files use
+# Nice3point's stub Revit API NuGet packages when UseStubRevitApi=true,
+# so a clean GitHub-hosted Windows runner can build every supported
+# Revit year and bundle them into the single-file installer.
+#
+# Triggers:
+#   - workflow_dispatch  -> manual run, exe attached as workflow artifact
+#   - push of a v* tag   -> attaches the exe to a GitHub Release
+#
+# Per-version build steps tolerate failures via continue-on-error so the
+# workflow still ships an installer even if (for example) the Nice3point
+# stub package for the very newest Revit year hasn't been published yet.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to upload the .exe to a GitHub Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # ---- Build each per-version project against stub Revit APIs ----
+
+      - name: Build Revit 2024
+        id: build_2024
+        continue-on-error: true
+        run: >-
+          dotnet build versions/2024/ClashControlConnector.2024.csproj
+          -c Release
+          -p:UseStubRevitApi=true
+          -o dist/build/2024
+
+      - name: Build Revit 2025
+        id: build_2025
+        continue-on-error: true
+        run: >-
+          dotnet build versions/2025/ClashControlConnector.2025.csproj
+          -c Release
+          -p:UseStubRevitApi=true
+          -o dist/build/2025
+
+      - name: Build Revit 2026
+        id: build_2026
+        continue-on-error: true
+        run: >-
+          dotnet build versions/2026/ClashControlConnector.2026.csproj
+          -c Release
+          -p:UseStubRevitApi=true
+          -o dist/build/2026
+
+      - name: Build Revit 2027
+        id: build_2027
+        continue-on-error: true
+        run: >-
+          dotnet build versions/2027/ClashControlConnector.2027.csproj
+          -c Release
+          -p:UseStubRevitApi=true
+          -o dist/build/2027
+
+      # ---- Stage successful builds into installer/Resources ----
+
+      - name: Stage installer resources
+        shell: pwsh
+        run: |
+          $years = '2024','2025','2026','2027'
+          $bundled = @()
+          foreach ($year in $years) {
+              $src = "dist/build/$year"
+              if (Test-Path "$src/ClashControlConnector.dll") {
+                  $dst = "installer/Resources/$year"
+                  New-Item -ItemType Directory -Force -Path $dst | Out-Null
+                  Copy-Item "$src/ClashControlConnector.dll"   "$dst/" -Force
+                  Copy-Item "$src/ClashControlConnector.addin" "$dst/" -Force
+                  Copy-Item "$src/Newtonsoft.Json.dll"         "$dst/" -Force
+                  Write-Host "Bundled Revit $year"
+                  $bundled += $year
+              } else {
+                  Write-Host "Skipping Revit $year (build did not produce a DLL)"
+              }
+          }
+          if ($bundled.Count -eq 0) {
+              Write-Error "No Revit version built successfully — cannot produce an installer."
+              exit 1
+          }
+          "BUNDLED_VERSIONS=$($bundled -join ', ')" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # ---- Compile the single-file installer exe ----
+
+      - name: Build installer exe
+        run: >-
+          dotnet build installer/ClashControlInstaller.csproj
+          -c Release
+          -o dist/installer
+
+      - name: Show bundled versions
+        shell: pwsh
+        run: |
+          Write-Host "Installer bundles: $env:BUNDLED_VERSIONS"
+          Get-Item dist/installer/ClashControlConnectorInstaller.exe |
+              Select-Object Name, Length, LastWriteTime
+
+      # ---- Publish artifacts ----
+
+      - name: Upload installer as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClashControlConnectorInstaller
+          path: dist/installer/ClashControlConnectorInstaller.exe
+          if-no-files-found: error
+
+      - name: Attach installer to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/installer/ClashControlConnectorInstaller.exe
+          body: |
+            ClashControl Connector for Revit
+            --------------------------------
+            Single-file installer. Double-click `ClashControlConnectorInstaller.exe`,
+            tick the Revit version(s) you want, click Install.
+
+            This release bundles support for: ${{ env.BUNDLED_VERSIONS }}.

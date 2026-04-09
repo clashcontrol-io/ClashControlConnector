@@ -46,6 +46,16 @@ That builds every supported Revit year it can find and packages the result into 
 dotnet build versions/2025/ClashControlConnector.2025.csproj -c Release
 ```
 
+### Building without any Revit installed (CI / fresh machine)
+
+Each per-version csproj has a `UseStubRevitApi` MSBuild flag. When set, the build swaps the Revit `HintPath` references for [Nice3point's stub Revit API NuGet packages](https://www.nuget.org/profiles/Nice3point), so a clean Windows machine with only the .NET 8 SDK installed can build every year:
+
+```
+dotnet build versions/2025/ClashControlConnector.2025.csproj -c Release -p:UseStubRevitApi=true
+```
+
+The repo also ships a GitHub Actions workflow at [`.github/workflows/build-installer.yml`](.github/workflows/build-installer.yml) that uses this flag to build every supported Revit year on a stock `windows-latest` runner and publishes `ClashControlConnectorInstaller.exe` as a workflow artifact (and as a GitHub Release asset when you push a `v*` tag). You never have to install Revit yourself just to ship a release.
+
 ## How it works
 
 ```
