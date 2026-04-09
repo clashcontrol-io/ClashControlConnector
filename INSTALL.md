@@ -2,60 +2,92 @@
 
 ## Requirements
 
-- **Revit 2025** (or later)
+- **Revit 2024, 2025, 2026 or 2027**
 - **Windows 10/11**
 - A browser to run [ClashControl](https://clashcontrol.io)
 
 ### For building from source (optional)
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) (includes the net48 targeting pack needed for the Revit 2024 build and the installer exe)
+- The Revit version(s) you want to build for, so the build can find `RevitAPI.dll` / `RevitAPIUI.dll`
 
 ---
 
 ## Installation
 
-### Option A: Pre-built release (easiest)
+### Option A: Download and double-click (easiest, recommended)
 
-1. Download the latest release `.zip` from the [Releases page](https://github.com/thomhoffer-arch/ClashControlConnector/releases)
-2. Extract the zip
-3. **Close Revit** if it's running
-4. Double-click **`install.bat`**
-5. Open Revit — you'll see a "ClashControl" tab in the ribbon
+1. Download **`ClashControlConnectorInstaller.exe`** from the [Releases page](https://github.com/thomhoffer-arch/ClashControlConnector/releases). A single file — no zip, no extraction.
+2. **Close Revit** if it's running.
+3. Double-click `ClashControlConnectorInstaller.exe`.
+4. A window pops up:
+
+   ```
+   Choose which Revit versions to install for:
+   Tick any combination. You can install multiple versions at once.
+
+     [x] Revit 2024  (Revit detected)
+     [x] Revit 2025  (Revit detected)
+     [ ] Revit 2026  (Revit not detected on this machine)
+     [ ] Revit 2027  (Revit not detected on this machine)
+   ```
+
+5. Tick every version you want to install for and press **Install**. The installer writes the bundled DLL + addin into each selected `%APPDATA%\Autodesk\Revit\Addins\<year>\` folder.
+6. Open Revit — you'll see a "ClashControl" tab in the ribbon.
+
+> **No PowerShell, no command line, no prereqs.** The installer targets .NET Framework 4.8 which ships with every Windows 10/11 machine, and every Revit build it needs is embedded inside the exe itself.
 
 ### Option B: Manual install
 
-Copy these 3 files to `%APPDATA%\Autodesk\Revit\Addins\2025\`:
+If you'd rather skip the GUI installer, you can extract the raw build files out of the `dist/versions/<year>/` folder (if you built from source) or copy them by hand from the release assets:
 
+| Revit | Source folder            | Target folder |
+|-------|--------------------------|---------------|
+| 2024  | `versions/2024/`         | `%APPDATA%\Autodesk\Revit\Addins\2024\` |
+| 2025  | `versions/2025/`         | `%APPDATA%\Autodesk\Revit\Addins\2025\` |
+| 2026  | `versions/2026/`         | `%APPDATA%\Autodesk\Revit\Addins\2026\` |
+| 2027  | `versions/2027/`         | `%APPDATA%\Autodesk\Revit\Addins\2027\` |
+
+The 3 files are:
 - `ClashControlConnector.dll`
 - `ClashControlConnector.addin`
 - `Newtonsoft.Json.dll`
 
-To find the folder, paste this into Windows Explorer's address bar:
+To find the target folder, paste this into Windows Explorer's address bar (replacing `2025` with your year):
 ```
 %APPDATA%\Autodesk\Revit\Addins\2025
 ```
 
+You can install multiple Revit versions by repeating this for each year.
+
 ### Option C: Build from source
 
-1. Clone the repository
-2. Make sure Revit 2025 is installed (the build needs `RevitAPI.dll` and `RevitAPIUI.dll`)
-3. If Revit is installed in a non-default location, update the paths in `ClashControlConnector/ClashControlConnector.csproj`
-4. Run `build.bat` — or from the command line:
-   ```
-   dotnet build ClashControlConnector/ClashControlConnector.csproj -c Release
-   ```
-5. The built files will be in `dist/` (if using `build.bat`) or `ClashControlConnector/bin/Release/`
-6. Run `dist/install.bat` or copy the 3 files manually
+1. Clone the repository.
+2. Install the Revit versions you want to build for (the build needs `RevitAPI.dll` and `RevitAPIUI.dll` from each Revit install).
+3. If Revit is installed in a non-default location, update the `HintPath` entries in `versions/<year>/ClashControlConnector.<year>.csproj`.
+4. Run `build.bat` at the repo root. It will:
+   - Build every `versions/<year>/` project it can find
+   - Stage the outputs into `installer/Resources/<year>/`
+   - Compile `installer/ClashControlInstaller.csproj`
+   - Drop the resulting **`ClashControlConnectorInstaller.exe`** (and the raw per-version builds under `versions/`) into `dist/`
+5. Double-click `dist/ClashControlConnectorInstaller.exe` and tick the version(s) you want.
+
+To build a single year without the installer exe:
+```
+dotnet build versions/2025/ClashControlConnector.2025.csproj -c Release
+```
 
 ---
 
 ## Uninstalling
 
-1. **Close Revit**
-2. Run `uninstall.bat`
-3. Or manually delete these files from `%APPDATA%\Autodesk\Revit\Addins\2025\`:
-   - `ClashControlConnector.dll`
-   - `ClashControlConnector.addin`
-   - `Newtonsoft.Json.dll`
+1. **Close Revit.**
+2. Run `ClashControlConnectorInstaller.exe` again.
+3. The installer auto-detects which versions currently have ClashControl Connector installed and ticks them in the list. Tick the ones you want to remove and click **Uninstall**.
+
+Or manually delete these files from the relevant `%APPDATA%\Autodesk\Revit\Addins\<year>\` folder:
+- `ClashControlConnector.dll`
+- `ClashControlConnector.addin`
+- `Newtonsoft.Json.dll`
 
 ---
 
@@ -115,9 +147,12 @@ This happens automatically while connected — no need to re-pull the model.
 ## Troubleshooting
 
 ### "No ClashControl tab in Revit"
-- Verify the 3 files are in `%APPDATA%\Autodesk\Revit\Addins\2025\`
+- Verify the 3 files are in `%APPDATA%\Autodesk\Revit\Addins\<year>\` for the Revit year you opened
 - Check Revit's add-in manager (Add-Ins tab → External Tools → Add-In Manager) — ClashControl Connector should be listed
-- Look for errors in Revit's journal file: `%LOCALAPPDATA%\Autodesk\Revit\Autodesk Revit 2025\Journals\`
+- Look for errors in Revit's journal file: `%LOCALAPPDATA%\Autodesk\Revit\Autodesk Revit <year>\Journals\`
+
+### "I installed for Revit 2025 but I'm on Revit 2024 (or vice versa)"
+Run `ClashControlConnectorInstaller.exe` again and tick the Revit year you actually use. The installer is safe to run repeatedly — it just overwrites existing files.
 
 ### "Cannot connect from ClashControl"
 - Click the ClashControl Connector ribbon button in Revit to verify the server is running
@@ -133,7 +168,7 @@ This happens automatically while connected — no need to re-pull the model.
 ### "Connection rejected (403)"
 - The connector validates the browser's origin for security
 - Allowed origins: `clashcontrol.io`, `localhost:3000`, `localhost:5173`, `127.0.0.1:3000`, `127.0.0.1:5173`
-- If you're running ClashControl on a different port, the origin needs to be added to the allowed list in `WebSocketServer.cs`
+- If you're running ClashControl on a different port, the origin needs to be added to the allowed list in `src/Core/WebSocketServer.cs`
 
 ### "Elements not highlighting in Revit"
 - Make sure a model has been pulled (exported) at least once — the connector needs the element cache to resolve IDs
@@ -144,5 +179,8 @@ This happens automatically while connected — no need to re-pull the model.
 - The progress bar in ClashControl shows the export progress
 - You can cancel an in-progress export from ClashControl
 
+### "Build failed for Revit 2024"
+Revit 2024 targets .NET Framework 4.8 rather than .NET 8. The `build.bat` script handles that automatically, but the .NET SDK still needs a copy of the 4.8 targeting pack. Windows 10/11 machines with Visual Studio 2022 installed have this out of the box; otherwise install the [.NET Framework 4.8 developer pack](https://dotnet.microsoft.com/download/dotnet-framework/net48).
+
 ### Port conflict
-If port 19780 is already in use, you'll need to change it in the source code (`App.cs`, line with `new WsServer(19780)`) and rebuild. A configurable port setting is planned for a future version.
+If port 19780 is already in use, you'll need to change it in the source code (`src/App.cs`, line with `new WsServer(19780)`) and rebuild. A configurable port setting is planned for a future version.

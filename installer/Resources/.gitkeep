@@ -1,0 +1,3 @@
+# This folder is populated at build time by build.bat.
+# Per-version Revit DLLs are copied here before the installer .csproj
+# is compiled, so they get embedded into the final installer .exe.

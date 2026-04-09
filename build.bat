@@ -1,12 +1,11 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 
 echo.
-echo  ClashControl Connector - Build Script
-echo  ======================================
+echo  ClashControl Connector - Multi-Version Build
+echo  =============================================
 echo.
 
-:: Check dotnet is available
 where dotnet >nul 2>&1
 if errorlevel 1 (
     echo  [!] .NET SDK not found. Install it from:
@@ -17,49 +16,102 @@ if errorlevel 1 (
 )
 
 set "SCRIPT_DIR=%~dp0"
-set "OUT_DIR=%SCRIPT_DIR%dist"
+set "DIST_DIR=%SCRIPT_DIR%dist"
+set "INSTALLER_DIR=%SCRIPT_DIR%installer"
+set "INSTALLER_RES=%INSTALLER_DIR%\Resources"
 
-:: Clean previous build
-if exist "%OUT_DIR%" rmdir /S /Q "%OUT_DIR%"
-mkdir "%OUT_DIR%"
+:: Versions to build. Add new years to this list when Autodesk releases them.
+set VERSIONS=2024 2025 2026 2027
 
-echo  Building Release...
-echo.
-dotnet build "%SCRIPT_DIR%ClashControlConnector\ClashControlConnector.csproj" -c Release -o "%OUT_DIR%\build"
+:: ----- Clean previous output -----
+if exist "%DIST_DIR%"      rmdir /S /Q "%DIST_DIR%"
+if exist "%INSTALLER_RES%" rmdir /S /Q "%INSTALLER_RES%"
+if exist "%INSTALLER_DIR%\bin" rmdir /S /Q "%INSTALLER_DIR%\bin"
+if exist "%INSTALLER_DIR%\obj" rmdir /S /Q "%INSTALLER_DIR%\obj"
+mkdir "%DIST_DIR%"
+mkdir "%DIST_DIR%\versions"
+mkdir "%INSTALLER_RES%"
 
-if errorlevel 1 (
+set "BUILD_FAILED="
+set "BUILT_ANY="
+
+:: ----- Build each per-version project -----
+for %%V in (%VERSIONS%) do (
     echo.
-    echo  [!] Build failed. Check the errors above.
+    echo  --- Building Revit %%V ---
+    set "PROJ=%SCRIPT_DIR%versions\%%V\ClashControlConnector.%%V.csproj"
+    set "OUT=%DIST_DIR%\versions\%%V"
+
+    if not exist "!PROJ!" (
+        echo  [!] Missing project file: !PROJ!
+        set "BUILD_FAILED=1"
+    ) else (
+        if not exist "!OUT!" mkdir "!OUT!"
+        dotnet build "!PROJ!" -c Release -o "!OUT!_build"
+        if errorlevel 1 (
+            echo.
+            echo  [!] Build failed for Revit %%V.
+            echo      Make sure Revit %%V is installed so the RevitAPI DLLs can be found,
+            echo      or update the HintPaths in versions\%%V\ClashControlConnector.%%V.csproj.
+            set "BUILD_FAILED=1"
+        ) else (
+            copy /Y "!OUT!_build\ClashControlConnector.dll"   "!OUT!\" >nul
+            copy /Y "!OUT!_build\ClashControlConnector.addin" "!OUT!\" >nul
+            copy /Y "!OUT!_build\Newtonsoft.Json.dll"         "!OUT!\" >nul
+            rmdir /S /Q "!OUT!_build"
+
+            :: Stage the payload into the installer so the .exe can embed it.
+            mkdir "%INSTALLER_RES%\%%V" 2>nul
+            copy /Y "!OUT!\ClashControlConnector.dll"   "%INSTALLER_RES%\%%V\" >nul
+            copy /Y "!OUT!\ClashControlConnector.addin" "%INSTALLER_RES%\%%V\" >nul
+            copy /Y "!OUT!\Newtonsoft.Json.dll"         "%INSTALLER_RES%\%%V\" >nul
+
+            echo  [OK] Revit %%V -^> dist\versions\%%V\
+            set "BUILT_ANY=1"
+        )
+    )
+)
+
+if not defined BUILT_ANY (
     echo.
-    echo  Common fixes:
-    echo    - Make sure Revit 2025 is installed
-    echo    - Or update the RevitAPI paths in ClashControlConnector.csproj
+    echo  [!] No Revit version built successfully. Cannot produce installer.
     echo.
     pause
     exit /b 1
 )
 
+:: ----- Build the standalone installer exe -----
 echo.
-echo  Packaging...
+echo  --- Building standalone installer exe ---
+dotnet build "%INSTALLER_DIR%\ClashControlInstaller.csproj" -c Release -o "%INSTALLER_DIR%\bin\Release"
+if errorlevel 1 (
+    echo.
+    echo  [!] Installer build failed.
+    set "BUILD_FAILED=1"
+) else (
+    copy /Y "%INSTALLER_DIR%\bin\Release\ClashControlConnectorInstaller.exe" "%DIST_DIR%\" >nul
+    echo  [OK] dist\ClashControlConnectorInstaller.exe
+)
 
-:: Copy only the files needed for installation
-copy /Y "%OUT_DIR%\build\ClashControlConnector.dll" "%OUT_DIR%\" >nul
-copy /Y "%OUT_DIR%\build\ClashControlConnector.addin" "%OUT_DIR%\" >nul
-copy /Y "%OUT_DIR%\build\Newtonsoft.Json.dll" "%OUT_DIR%\" >nul
-copy /Y "%SCRIPT_DIR%install.bat" "%OUT_DIR%\" >nul
-copy /Y "%SCRIPT_DIR%uninstall.bat" "%OUT_DIR%\" >nul
-
-:: Clean up build intermediates
-rmdir /S /Q "%OUT_DIR%\build"
+:: ----- Clean up installer staging area (DLLs not needed in-tree) -----
+if exist "%INSTALLER_RES%" rmdir /S /Q "%INSTALLER_RES%"
+mkdir "%INSTALLER_RES%" >nul
+echo # placeholder > "%INSTALLER_RES%\.gitkeep"
 
 echo.
-echo  Build complete! Output in: dist\
+if defined BUILD_FAILED (
+    echo  Build finished WITH ERRORS. Check the output above.
+) else (
+    echo  All versions built successfully.
+)
+
 echo.
-echo  Contents:
-dir /B "%OUT_DIR%"
+echo  Output layout:
+echo    %DIST_DIR%\
+echo      ClashControlConnectorInstaller.exe  ^<- one-click installer
+echo      versions\
+echo        2024\  2025\  2026\  2027\        ^<- raw builds (for manual install)
 echo.
-echo  To install: run dist\install.bat
-echo  Or copy the 3 files manually to:
-echo    %%APPDATA%%\Autodesk\Revit\Addins\2025\
+echo  Ship ClashControlConnectorInstaller.exe to end users.
 echo.
 pause

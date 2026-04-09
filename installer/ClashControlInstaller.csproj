@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ClashControl Connector — standalone GUI installer
+    ==================================================
+    A single .exe users can download and double-click. No PowerShell,
+    no batch files, no prerequisites beyond stock Windows 10/11.
+
+    - Targets net48 so it runs on every Windows 10/11 machine out of the
+      box (.NET Framework 4.8 ships with the OS) — no .NET 8 runtime
+      needed just to install the addin.
+    - Embeds the built DLLs for each Revit year as manifest resources
+      under Resources\<year>\. build.bat populates that folder by
+      building each versions\<year> project first, then compiling this
+      installer, producing a single self-contained installer.exe.
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ClashControlInstaller</RootNamespace>
+    <AssemblyName>ClashControlConnectorInstaller</AssemblyName>
+    <UseWindowsForms>true</UseWindowsForms>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AssemblyTitle>ClashControl Connector Installer</AssemblyTitle>
+    <Product>ClashControl Connector</Product>
+    <Description>Installs ClashControl Connector for one or more Revit versions.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Include every file dropped into Resources\ as an embedded resource.
+      The wildcard silently picks up whichever per-version builds exist
+      at the time this project is compiled — build.bat populates the
+      Resources\ tree before running dotnet on this csproj.
+
+      LogicalName forces a predictable, version-qualified resource id of
+      the form  cc.<year>.<filename>  (e.g. cc.2025.ClashControlConnector.dll).
+      Using an explicit LogicalName avoids MSBuild's default name mangling
+      (which, for folders whose names start with a digit, prefixes an
+      underscore to satisfy C# identifier rules).
+    -->
+    <EmbeddedResource Include="Resources\**\*.*" Exclude="Resources\.gitkeep">
+      <LogicalName>cc.$([System.Text.RegularExpressions.Regex]::Replace('%(RecursiveDir)', '[\\/]', '.'))%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

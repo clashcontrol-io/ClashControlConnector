@@ -1,5 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!--
+    ClashControl Connector — Revit 2025 build
+    =========================================
+    Revit 2025 is the first Revit version built on .NET 8.
+    All shared source lives in ..\..\src and is pulled in via the Compile
+    globs below so every per-version project builds from exactly the same
+    code. Only this file (and the Revit reference paths) differs per year.
+  -->
+
   <PropertyGroup>
     <TargetFramework>net8.0-windows</TargetFramework>
     <LangVersion>latest</LangVersion>
@@ -9,13 +18,15 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <UseWindowsForms>true</UseWindowsForms>
+    <DefineConstants>$(DefineConstants);REVIT2025</DefineConstants>
+    <RevitVersion>2025</RevitVersion>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
 
-  <!-- Revit API references — adjust paths to your Revit install -->
+  <!-- Revit API references for Revit 2025 -->
   <ItemGroup>
     <Reference Include="RevitAPI">
       <HintPath>C:\Program Files\Autodesk\Revit 2025\RevitAPI.dll</HintPath>
@@ -27,14 +38,18 @@
     </Reference>
   </ItemGroup>
 
+  <!-- Shared source files live in src/. Exclude any bin/obj in the shared dir. -->
   <ItemGroup>
-    <None Include="ClashControlConnector.addin">
+    <Compile Remove="**\*.cs" />
+    <Compile Include="..\..\src\**\*.cs" Exclude="..\..\src\**\bin\**;..\..\src\**\obj\**" />
+    <EmbeddedResource Include="..\..\src\Resources\icon.png">
+      <Link>Resources\icon.png</Link>
+      <LogicalName>ClashControlConnector.Resources.icon.png</LogicalName>
+    </EmbeddedResource>
+    <None Include="..\..\src\ClashControlConnector.addin">
+      <Link>ClashControlConnector.addin</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-  </ItemGroup>
-
-  <ItemGroup>
-    <EmbeddedResource Include="Resources\icon.png" />
   </ItemGroup>
 
 </Project>
