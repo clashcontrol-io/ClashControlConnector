@@ -1,0 +1,62 @@
+name: Auto-release
+
+# On every push to main, read the version from src/App.cs.
+# If a tag for that version doesn't exist yet, create it — which
+# triggers build-installer.yml to build the installer and attach
+# it to the GitHub Release automatically.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  tag-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history to check existing tags
+
+      - name: Read version from App.cs
+        id: ver
+        run: |
+          VERSION=$(grep -oP 'public const string Version = "\K[^"]+' src/App.cs)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
+
+      - name: Check if tag already exists
+        id: tag_check
+        run: |
+          if git ls-remote --tags origin "refs/tags/v${{ steps.ver.outputs.version }}" | grep -q .; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag v${{ steps.ver.outputs.version }} already exists — skipping release."
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Tag v${{ steps.ver.outputs.version }} is new — will create release."
+          fi
+
+      - name: Create tag and GitHub Release
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ClashControl Connector ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          body: |
+            ## ClashControl Connector ${{ steps.ver.outputs.tag }}
+
+            Single-file installer for Revit 2024 / 2025 / 2026 / 2027.
+
+            **Installation:** Download `ClashControlConnectorInstaller.exe` below,
+            run it, tick the Revit version(s) you use, click Install.
+
+            > The installer is built and attached by the **Build installer** workflow
+            > triggered by this release tag. If the asset isn't here yet, check the
+            > [Actions tab](../../actions/workflows/build-installer.yml) — it runs
+            > on Windows and takes ~3 minutes.
