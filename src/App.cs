@@ -39,6 +39,7 @@ namespace ClashControlConnector
         // open docs (including linked models opened as main docs elsewhere)
         // do not pollute live updates for the current session.
         private static string _hostDocKey;
+        private static string _currentDocTitle;
         private static HashSet<ElementId> _lastSelection = new HashSet<ElementId>();
         private static double[] _lastCameraEye;
         private static DateTime _lastCameraSendTime = DateTime.MinValue;
@@ -248,6 +249,7 @@ namespace ClashControlConnector
             _hostDocKey = null;
 
             _lastKnownConnected = false;
+            _currentDocTitle = null;
             UpdateButtonStatus(false, false);
             Debug.WriteLine("[CC] Server stopped");
         }
@@ -274,7 +276,7 @@ namespace ClashControlConnector
                 switch (type)
                 {
                     case "ping":
-                        _ = _server.SendAsync(Messages.Pong());
+                        _ = _server.SendAsync(Messages.Pong(_currentDocTitle, _currentDocTitle != null));
                         break;
 
                     case "export":
@@ -350,6 +352,7 @@ namespace ClashControlConnector
             public bool StartSent;
             public List<ElementData> PendingData = new List<ElementData>();
             public List<string> UnchangedGlobalIds = new List<string>();
+            public Dictionary<string, string> ElementHashes = new Dictionary<string, string>();
         }
 
         /// <summary>
@@ -403,6 +406,7 @@ namespace ClashControlConnector
 
             // Remember which doc is "host" for live-update filtering.
             _hostDocKey = ElementCache.GetDocKey(doc);
+            _currentDocTitle = (doc.Title ?? "Host") + ".rvt";
 
             // Host model — always present, always first
             var hostInfo = new ModelInfo
@@ -554,6 +558,7 @@ namespace ClashControlConnector
                         data.Geometry.Color = GetElementColor(el, elDoc);
 
                         string contentHash = ContentHasher.ComputeHash(data);
+                        model.ElementHashes[data.GlobalId] = contentHash;
 
                         if (state.IsDeltaExport
                             && state.KnownElements.TryGetValue(data.GlobalId, out var browserHash)
@@ -660,6 +665,7 @@ namespace ClashControlConnector
                 storeyData,
                 relatedPairs,
                 unchanged,
+                model.ElementHashes.Count > 0 ? model.ElementHashes : null,
                 _activeProjectId));
 
             if (state.IsDeltaExport)
@@ -1106,14 +1112,16 @@ namespace ClashControlConnector
         {
             _cache.Clear();
             _hostDocKey = null;
+            _currentDocTitle = e.Document.Title + ".rvt";
             if (!_server.IsClientConnected) return;
-            _ = _server.SendAsync(Messages.Status(true, e.Document.Title + ".rvt"));
+            _ = _server.SendAsync(Messages.Status(true, _currentDocTitle));
         }
 
         private static void OnDocumentClosing(object sender, DocumentClosingEventArgs e)
         {
             _cache.Clear();
             _hostDocKey = null;
+            _currentDocTitle = null;
             _highlightedElementIds.Clear();
             if (!_server.IsClientConnected) return;
             _ = _server.SendAsync(Messages.Status(true, ""));
