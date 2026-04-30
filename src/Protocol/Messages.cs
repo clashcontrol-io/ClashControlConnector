@@ -5,11 +5,18 @@ namespace ClashControlConnector.Protocol
 {
     public static class Messages
     {
-        public const string ProtocolVersion = "1";
+        public const string ProtocolVersion = "1.0";
 
-        public static string Pong()
+        public static string Pong(string documentName = null, bool connected = false)
         {
-            return JsonConvert.SerializeObject(new { type = "pong", connectorVersion = App.Version });
+            return JsonConvert.SerializeObject(new
+            {
+                type = "pong",
+                connectorVersion = App.Version,
+                version = ProtocolVersion,
+                documentName,
+                connected
+            });
         }
 
         public static string Status(bool connected, string documentName)
@@ -45,7 +52,7 @@ namespace ClashControlConnector.Protocol
                 elementCount,
                 modelIndex,
                 totalModels,
-                isLinked,
+                isLink = isLinked,
                 projectId
             });
         }
@@ -63,7 +70,7 @@ namespace ClashControlConnector.Protocol
             });
         }
 
-        public static string ModelEnd(string modelId, List<string> storeys, List<object> storeyData, Dictionary<string, bool> relatedPairs, List<string> unchanged = null, string projectId = null)
+        public static string ModelEnd(string modelId, List<string> storeys, List<object> storeyData, Dictionary<string, bool> relatedPairs, List<string> unchanged = null, Dictionary<string, string> elementHashes = null, string projectId = null)
         {
             return JsonConvert.SerializeObject(new
             {
@@ -73,6 +80,7 @@ namespace ClashControlConnector.Protocol
                 storeyData,
                 relatedPairs,
                 unchanged,
+                elementHashes,
                 projectId
             });
         }
