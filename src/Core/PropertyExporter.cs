@@ -70,6 +70,7 @@ namespace ClashControlConnector.Core
             {
                 GlobalId = GlobalIdEncoder.FromElement(element),
                 RevitId = element.Id.Value,
+                UniqueId = element.UniqueId,
                 Name = element.Name ?? "",
                 Category = GetIfcType(element)
             };

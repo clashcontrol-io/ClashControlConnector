@@ -29,6 +29,10 @@ namespace ClashControlConnector
         private static ChangeDebouncer _debouncer;
         private static CancellationTokenSource _exportCts;
         private static string _activeProjectId;
+        // Host document version captured at export start → sent on model-start so CC
+        // can tag a modelInstanceId / freshness stamp (detect "different copy").
+        private static string _activeDocVersion;
+        private static int _activeNumberOfSaves;
         private static readonly HashSet<ElementId> _highlightedElementIds = new HashSet<ElementId>();
         private static PushButton _ribbonButton;
         private static bool _lastKnownConnected;
@@ -389,6 +393,20 @@ namespace ClashControlConnector
             if (projectId != null)
                 _activeProjectId = projectId;
 
+            // Capture the document version once → sent on every model-start.
+            _activeDocVersion = null;
+            _activeNumberOfSaves = 0;
+            try
+            {
+                var dv = Document.GetDocumentVersion(doc);
+                if (dv != null)
+                {
+                    _activeDocVersion = dv.VersionGUID.ToString();
+                    _activeNumberOfSaves = dv.NumberOfSaves;
+                }
+            }
+            catch { /* version unavailable (e.g. family doc) — leave null */ }
+
             bool isDeltaExport = knownElements != null && knownElements.Count > 0;
 
             // Only clear cache for full exports
@@ -536,7 +554,9 @@ namespace ClashControlConnector
                         state.ModelIndex,
                         state.Models.Count,
                         model.IsLinked,
-                        _activeProjectId));
+                        _activeProjectId,
+                        _activeDocVersion,
+                        _activeNumberOfSaves));
                     model.StartSent = true;
                 }
 

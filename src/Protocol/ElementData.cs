@@ -12,6 +12,9 @@ namespace ClashControlConnector.Protocol
         [JsonProperty("level")] public string Level { get; set; }
         [JsonProperty("type")] public string Type { get; set; }
         [JsonProperty("revitId")] public long RevitId { get; set; }
+        // Revit's only stable cross-document key (ElementId is doc-local). The
+        // connective-spine join (CC ↔ PDRA) resolves on this — see CC get_clashes.uniqueIdA/B.
+        [JsonProperty("uniqueId")] public string UniqueId { get; set; }
         [JsonProperty("modelId")] public string ModelId { get; set; }
         [JsonProperty("modelName", NullValueHandling = NullValueHandling.Ignore)] public string ModelName { get; set; }
         [JsonProperty("materials")] public List<string> Materials { get; set; }

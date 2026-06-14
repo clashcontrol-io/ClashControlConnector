@@ -42,7 +42,7 @@ namespace ClashControlConnector.Protocol
             });
         }
 
-        public static string ModelStart(string modelId, string name, int elementCount, int modelIndex, int totalModels, bool isLinked, string projectId = null)
+        public static string ModelStart(string modelId, string name, int elementCount, int modelIndex, int totalModels, bool isLinked, string projectId = null, string docVersion = null, int numberOfSaves = 0)
         {
             return JsonConvert.SerializeObject(new
             {
@@ -53,7 +53,11 @@ namespace ClashControlConnector.Protocol
                 modelIndex,
                 totalModels,
                 isLink = isLinked,
-                projectId
+                projectId,
+                // Document VersionGUID + save count → CC uses as modelInstanceId +
+                // freshness, so a join can't silently cross two document copies.
+                docVersion,
+                numberOfSaves
             });
         }
 
