@@ -31,14 +31,18 @@ namespace ClashControlConnector.Protocol
             });
         }
 
-        public static string ExportStart(int totalModels, int totalElements, string projectId = null)
+        public static string ExportStart(int totalModels, int totalElements, string projectId = null, string projectUniqueId = null)
         {
             return JsonConvert.SerializeObject(new
             {
                 type = "export-start",
                 totalModels,
                 totalElements,
-                projectId
+                projectId,
+                // Stable Revit project identity (host ProjectInformation.UniqueId).
+                // ClashControl uses this to build a deterministic projectKey
+                // ("revit:<uid>") that matches PDRA/Loam for the same open doc.
+                projectUniqueId
             });
         }
 
