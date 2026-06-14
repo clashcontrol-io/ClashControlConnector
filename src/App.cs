@@ -343,6 +343,11 @@ namespace ClashControlConnector
             public string ModelName;      // Display name (e.g. "Architecture.rvt")
             public Document Doc;          // Revit document (host or linked)
             public bool IsLinked;
+            // For linked models: the RevitLinkInstance placement (its total
+            // transform in the host's coordinate space). Linked element geometry
+            // is read in the LINKED doc's coordinates, so this must be applied or
+            // the elements appear offset/rotated ("flying") in ClashControl.
+            public Transform LinkTransform;
             public List<Element> Elements = new List<Element>();
 
             // Per-model progress
@@ -453,12 +458,19 @@ namespace ClashControlConnector
                         nameCounts[baseName] = seen + 1;
                         var displayName = seen == 0 ? baseName : $"{baseName} ({seen + 1})";
 
+                        // The link's placement in the host (shared-coordinate
+                        // offset/rotation). Applied to every element of this link
+                        // so it lands in the right spot in ClashControl.
+                        Transform linkXf = null;
+                        try { linkXf = linkInst.GetTotalTransform(); } catch { /* fall back to identity */ }
+
                         var linkInfo = new ModelInfo
                         {
                             ModelId = BuildLinkedModelId(linkInst, linkDoc),
                             ModelName = displayName,
                             Doc = linkDoc,
                             IsLinked = true,
+                            LinkTransform = linkXf,
                             Elements = linkElements
                         };
                         state.Models.Add(linkInfo);
@@ -552,7 +564,9 @@ namespace ClashControlConnector
                         data.ExpressId = ++model.ExpressId;
                         data.ModelId = model.ModelId;
                         data.ModelName = model.ModelName;
-                        data.Geometry = GeometryExporter.ExtractGeometry(el);
+                        // Linked models carry their placement transform so geometry
+                        // lands in the host's coordinate space (host = identity).
+                        data.Geometry = GeometryExporter.ExtractGeometry(el, model.LinkTransform);
                         if (data.Geometry == null)
                             data.Geometry = new ElementGeometry();
                         data.Geometry.Color = GetElementColor(el, elDoc);

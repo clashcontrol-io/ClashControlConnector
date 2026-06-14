@@ -13,6 +13,19 @@ namespace ClashControlConnector.Core
     {
         public static ElementGeometry ExtractGeometry(Element element)
         {
+            return ExtractGeometry(element, null);
+        }
+
+        /// <param name="baseTransform">
+        /// Placement applied to all geometry before the feet→meters / Z-up→Y-up
+        /// conversion. For host-model elements this is null (identity, geometry is
+        /// already in model coords). For LINKED-model elements it must be the
+        /// RevitLinkInstance total transform — link geometry is read in the linked
+        /// document's own coordinate system, so without this it lands offset/rotated
+        /// ("flying") in ClashControl.
+        /// </param>
+        public static ElementGeometry ExtractGeometry(Element element, Transform baseTransform)
+        {
             var positions = new List<float>();
             var indices = new List<uint>();
             var normals = new List<float>();
@@ -27,7 +40,7 @@ namespace ClashControlConnector.Core
             if (geomElement == null) return null;
 
             uint vertexOffset = 0;
-            ProcessGeometry(geomElement, Transform.Identity, positions, indices, normals, ref vertexOffset);
+            ProcessGeometry(geomElement, baseTransform ?? Transform.Identity, positions, indices, normals, ref vertexOffset);
 
             if (positions.Count == 0) return null;
 
@@ -53,9 +66,13 @@ namespace ClashControlConnector.Core
 
                     case GeometryInstance instance:
                         // GetInstanceGeometry() already applies the instance transform
+                        // (within this document), but we must still carry the incoming
+                        // `transform` — the link placement for linked models — or linked
+                        // instanced geometry would ignore the link offset. For the host
+                        // model `transform` is identity, so behaviour is unchanged.
                         var instanceGeom = instance.GetInstanceGeometry();
                         if (instanceGeom != null)
-                            ProcessGeometry(instanceGeom, Transform.Identity, positions, indices, normals, ref vertexOffset);
+                            ProcessGeometry(instanceGeom, transform, positions, indices, normals, ref vertexOffset);
                         break;
                 }
             }
