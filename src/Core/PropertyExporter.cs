@@ -167,24 +167,12 @@ namespace ClashControlConnector.Core
         {
             var bucket = new Dictionary<string, object>();
 
-            // Built-in Assembly Code / Description (Uniformat/NL-SfB slot in many templates).
-            void AddBuiltIn(BuiltInParameter bip)
-            {
-                try
-                {
-                    var p = typeElem.get_Parameter(bip);
-                    if (p != null && p.HasValue && p.StorageType == StorageType.String)
-                    {
-                        var v = p.AsString();
-                        if (!string.IsNullOrWhiteSpace(v)) bucket[p.Definition.Name] = v;
-                    }
-                }
-                catch { /* parameter not present on this version/element */ }
-            }
-            AddBuiltIn(BuiltInParameter.UNIFORMAT_CODE);
-            AddBuiltIn(BuiltInParameter.UNIFORMAT_DESCRIPTION);
-
-            // Named (shared/project) type parameters carrying a classification code.
+            // Walk type parameters by NAME and keep the classification-bearing ones.
+            // This catches the built-in "Assembly Code" (Uniformat/NL-SfB slot) as well
+            // as shared NL-SfB/Uniclass/OmniClass params — WITHOUT referencing
+            // BuiltInParameter.UNIFORMAT_CODE/UNIFORMAT_DESCRIPTION, which were removed
+            // from the Revit 2026 API and broke that version's build (regressed the
+            // 2026 bundle). Name-based lookup is version-agnostic.
             foreach (Parameter param in typeElem.Parameters)
             {
                 if (!param.HasValue || param.StorageType != StorageType.String) continue;

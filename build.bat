@@ -23,6 +23,14 @@ set "INSTALLER_RES=%INSTALLER_DIR%\Resources"
 :: Versions to build. Add new years to this list when Autodesk releases them.
 set VERSIONS=2024 2025 2026 2027
 
+:: Optional: "build.bat stubs" forces every version to build against the stub
+:: RevitAPI (Nice3point NuGet) so ALL versions bundle without any Revit installed
+:: — use this for releases. Without it, each version builds against its local
+:: Revit install and falls back to the stub API only if that install is missing,
+:: so e.g. a machine with just 2024/2025 still ships 2026/2027.
+set "FORCE_STUB="
+if /I "%~1"=="stubs" set "FORCE_STUB=-p:UseStubRevitApi=true"
+
 :: ----- Clean previous output -----
 if exist "%DIST_DIR%"      rmdir /S /Q "%DIST_DIR%"
 if exist "%INSTALLER_RES%" rmdir /S /Q "%INSTALLER_RES%"
@@ -47,11 +55,15 @@ for %%V in (%VERSIONS%) do (
         set "BUILD_FAILED=1"
     ) else (
         if not exist "!OUT!" mkdir "!OUT!"
-        dotnet build "!PROJ!" -c Release -o "!OUT!_build"
+        dotnet build "!PROJ!" -c Release -o "!OUT!_build" %FORCE_STUB%
+        if errorlevel 1 if not defined FORCE_STUB (
+            echo  [i] Revit %%V not installed locally — retrying against the stub RevitAPI ^(NuGet^)...
+            dotnet build "!PROJ!" -c Release -o "!OUT!_build" -p:UseStubRevitApi=true
+        )
         if errorlevel 1 (
             echo.
             echo  [!] Build failed for Revit %%V.
-            echo      Make sure Revit %%V is installed so the RevitAPI DLLs can be found,
+            echo      Install Revit %%V, or ensure NuGet access so the stub RevitAPI can restore,
             echo      or update the HintPaths in versions\%%V\ClashControlConnector.%%V.csproj.
             set "BUILD_FAILED=1"
         ) else (
