@@ -83,10 +83,11 @@ namespace ClashControlConnector.Core
 
             // Type name
             var typeId = element.GetTypeId();
+            Element typeElem = null;
             if (typeId != ElementId.InvalidElementId)
             {
-                var type = doc.GetElement(typeId);
-                data.Type = type?.Name ?? "";
+                typeElem = doc.GetElement(typeId);
+                data.Type = typeElem?.Name ?? "";
             }
 
             // Materials
@@ -115,7 +116,63 @@ namespace ClashControlConnector.Core
                     data.Parameters[groupName][param.Definition.Name] = value;
             }
 
+            // Classification lives on the TYPE, not the instance (Revit's built-in
+            // "Assembly Code" and most NL-SfB / Uniclass / OmniClass shared params
+            // are type parameters). The instance-parameter loop above misses them,
+            // which is why ClashControl saw classification:null. Pull the
+            // classification-bearing type parameters into a dedicated group so
+            // ClashControl's _classOf can read them.
+            if (typeElem != null)
+                ExtractClassificationFromType(typeElem, data);
+
             return data;
+        }
+
+        // Parameter names (lower-cased, separators stripped) that carry a
+        // classification code. Mirrors ClashControl's _classSysOf matcher.
+        private static bool IsClassificationParam(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            var n = name.ToLowerInvariant().Replace(" ", "").Replace("_", "")
+                        .Replace("-", "").Replace("/", "");
+            return n.Contains("nlsfb") || n.Contains("sfb") || n.Contains("uniclass")
+                || n.Contains("omniclass") || n.Contains("uniformat")
+                || n.Contains("classification") || n.Contains("assemblycode");
+        }
+
+        private static void ExtractClassificationFromType(Element typeElem, ElementData data)
+        {
+            var bucket = new Dictionary<string, object>();
+
+            // Built-in Assembly Code / Description (Uniformat/NL-SfB slot in many templates).
+            void AddBuiltIn(BuiltInParameter bip)
+            {
+                try
+                {
+                    var p = typeElem.get_Parameter(bip);
+                    if (p != null && p.HasValue && p.StorageType == StorageType.String)
+                    {
+                        var v = p.AsString();
+                        if (!string.IsNullOrWhiteSpace(v)) bucket[p.Definition.Name] = v;
+                    }
+                }
+                catch { /* parameter not present on this version/element */ }
+            }
+            AddBuiltIn(BuiltInParameter.UNIFORMAT_CODE);
+            AddBuiltIn(BuiltInParameter.UNIFORMAT_DESCRIPTION);
+
+            // Named (shared/project) type parameters carrying a classification code.
+            foreach (Parameter param in typeElem.Parameters)
+            {
+                if (!param.HasValue || param.StorageType != StorageType.String) continue;
+                var name = param.Definition?.Name;
+                if (!IsClassificationParam(name)) continue;
+                var v = param.AsString();
+                if (!string.IsNullOrWhiteSpace(v)) bucket[name] = v;
+            }
+
+            if (bucket.Count > 0)
+                data.Parameters["Classification"] = bucket;
         }
 
         private static string GetParameterGroupName(Parameter param)
