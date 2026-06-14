@@ -359,6 +359,12 @@ namespace ClashControlConnector
             public long ExpressId;
             public int ElementsSent;
             public bool StartSent;
+            // Fast-delta: document version token captured at this export. If it
+            // equals the token from the previous export (and the browser still holds
+            // the model — i.e. it sent knownElements), the whole model is unchanged
+            // and its geometry is skipped (FastSkip). VersionGUID changes on any edit.
+            public string VersionToken;
+            public bool FastSkip;
             public List<ElementData> PendingData = new List<ElementData>();
             public List<string> UnchangedGlobalIds = new List<string>();
             public Dictionary<string, string> ElementHashes = new Dictionary<string, string>();
@@ -543,7 +549,47 @@ namespace ClashControlConnector
             return "link:" + instPart + "|" + docPart;
         }
 
+        // Fast-delta: per-model document version from the previous export (modelId →
+        // token). On a delta re-pull, a model whose token is unchanged is skipped
+        // wholesale. Persists across exports; empty after a Connector restart (→ full
+        // export, the safe fallback). See GetModelVersionToken.
+        private static readonly Dictionary<string, string> _lastModelVersion
+            = new Dictionary<string, string>();
+
+        // Cheap document-version token. Changes on ANY edit/save, so equality means
+        // "this document is byte-identical to last export". Host reuses the version
+        // captured at export start; links read their own document's version.
+        private static string GetModelVersionToken(ModelInfo model)
+        {
+            try
+            {
+                if (!model.IsLinked)
+                    return _activeDocVersion != null ? (_activeDocVersion + ":" + _activeNumberOfSaves) : null;
+                var dv = Document.GetDocumentVersion(model.Doc);
+                return dv != null ? (dv.VersionGUID.ToString() + ":" + dv.NumberOfSaves) : null;
+            }
+            catch { return null; }
+        }
+
+        // Yield the Revit API thread between chunks so a large export doesn't freeze
+        // Revit. Enqueue from a background thread AFTER the current Execute returns,
+        // so the next chunk lands on a fresh ExternalEvent pass (the handler's Execute
+        // drains its whole queue, so re-enqueuing inline would NOT yield).
+        private static void ScheduleNextChunk(ExportState state)
+        {
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                try { await System.Threading.Tasks.Task.Delay(1).ConfigureAwait(false); } catch { }
+                RevitCommandHandler.Enqueue(app => RunExportChunk(app, state));
+            });
+        }
+
         private static void ProcessExportChunk(ExportState state)
+        {
+            RevitCommandHandler.Enqueue(app => RunExportChunk(app, state));
+        }
+
+        private static void RunExportChunk(UIApplication app, ExportState state)
         {
             if (state.Ct.IsCancellationRequested)
             {
@@ -553,7 +599,6 @@ namespace ClashControlConnector
                 return;
             }
 
-            RevitCommandHandler.Enqueue(app =>
             {
                 if (!_server.IsClientConnected) return;
                 if (state.ModelIndex >= state.Models.Count)
@@ -562,7 +607,7 @@ namespace ClashControlConnector
                     return;
                 }
 
-                const int chunkSize = 25;
+                const int chunkSize = 250;
                 const int batchSize = 50;
 
                 var model = state.Models[state.ModelIndex];
@@ -570,6 +615,10 @@ namespace ClashControlConnector
                 // Emit model-start the first time we touch this model.
                 if (!model.StartSent)
                 {
+                    model.VersionToken = GetModelVersionToken(model);
+                    model.FastSkip = state.IsDeltaExport && model.VersionToken != null
+                        && _lastModelVersion.TryGetValue(model.ModelId, out var prevV)
+                        && prevV == model.VersionToken;
                     _ = _server.SendAsync(Messages.ModelStart(
                         model.ModelId,
                         model.ModelName,
@@ -591,6 +640,18 @@ namespace ClashControlConnector
                     {
                         var el = model.Elements[i];
                         var elDoc = el.Document ?? model.Doc;
+                        // Fast-delta: model unchanged since last export AND the browser
+                        // still holds it (delta re-pull) → skip the expensive geometry;
+                        // just mark the element unchanged so the browser keeps its copy.
+                        if (model.FastSkip)
+                        {
+                            string fgid;
+                            try { fgid = GlobalIdEncoder.FromElement(el); } catch { continue; }
+                            model.UnchangedGlobalIds.Add(fgid);
+                            var fch = _cache.GetContentHash(fgid);
+                            if (fch != null) model.ElementHashes[fgid] = fch;
+                            continue;
+                        }
                         var data = PropertyExporter.ExtractProperties(el, elDoc);
                         data.ExpressId = ++model.ExpressId;
                         data.ModelId = model.ModelId;
@@ -649,15 +710,15 @@ namespace ClashControlConnector
 
                 if (state.ModelIndex < state.Models.Count)
                 {
-                    // More models to process — yield and continue.
-                    ProcessExportChunk(state);
+                    // More work (this model or the next) — yield to Revit, then continue.
+                    ScheduleNextChunk(state);
                 }
                 else
                 {
                     // All models done.
                     FinishExport(state);
                 }
-            });
+            }
         }
 
         /// <summary>
@@ -713,8 +774,13 @@ namespace ClashControlConnector
                 model.ElementHashes.Count > 0 ? model.ElementHashes : null,
                 _activeProjectId));
 
+            // Record the version baseline so the NEXT delta re-pull can fast-skip this
+            // model if nothing changed. (FastSkip runs reuse the same token, so this is
+            // a harmless no-op in that case.)
+            if (model.VersionToken != null) _lastModelVersion[model.ModelId] = model.VersionToken;
+
             if (state.IsDeltaExport)
-                Debug.WriteLine($"[CC] Delta model '{model.ModelName}': {model.ElementsSent} changed, {model.UnchangedGlobalIds.Count} unchanged");
+                Debug.WriteLine($"[CC] Delta model '{model.ModelName}': {model.ElementsSent} changed, {model.UnchangedGlobalIds.Count} unchanged" + (model.FastSkip ? " (fast-skip: version unchanged)" : ""));
         }
 
         private static void FinishExport(ExportState state)
