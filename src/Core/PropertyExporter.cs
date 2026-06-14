@@ -141,7 +141,29 @@ namespace ClashControlConnector.Core
                 || n.Contains("classification") || n.Contains("assemblycode");
         }
 
+        // Per-type classification cache (typeId → classification bucket). Classification
+        // is a TYPE property, so for a model with thousands of instances of a few types
+        // (e.g. an 82k MEP model) this walks each type's parameters ONCE per export
+        // instead of once per instance — the main cost the classification fix added.
+        // Reset at the start of every export via ResetClassificationCache().
+        private static readonly Dictionary<long, Dictionary<string, object>> _typeClassCache
+            = new Dictionary<long, Dictionary<string, object>>();
+
+        public static void ResetClassificationCache() { _typeClassCache.Clear(); }
+
         private static void ExtractClassificationFromType(Element typeElem, ElementData data)
+        {
+            long typeKey = typeElem.Id.Value;
+            if (!_typeClassCache.TryGetValue(typeKey, out var bucket))
+            {
+                bucket = ComputeTypeClassification(typeElem);
+                _typeClassCache[typeKey] = bucket; // cache even when empty — avoids re-walking
+            }
+            if (bucket.Count > 0)
+                data.Parameters["Classification"] = bucket;
+        }
+
+        private static Dictionary<string, object> ComputeTypeClassification(Element typeElem)
         {
             var bucket = new Dictionary<string, object>();
 
@@ -171,9 +193,7 @@ namespace ClashControlConnector.Core
                 var v = param.AsString();
                 if (!string.IsNullOrWhiteSpace(v)) bucket[name] = v;
             }
-
-            if (bucket.Count > 0)
-                data.Parameters["Classification"] = bucket;
+            return bucket;
         }
 
         private static string GetParameterGroupName(Parameter param)
