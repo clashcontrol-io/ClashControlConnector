@@ -484,8 +484,13 @@ namespace ClashControlConnector
                 }
             }
 
+            // Stable Revit project identity for a deterministic ClashControl
+            // projectKey ("revit:<uid>") that matches PDRA/Loam for this doc.
+            string projectUniqueId = null;
+            try { projectUniqueId = doc?.ProjectInformation?.UniqueId; } catch { /* unavailable */ }
+
             // Announce the whole export so ClashControl can prepare N model slots.
-            _ = _server.SendAsync(Messages.ExportStart(state.Models.Count, state.TotalElements, _activeProjectId));
+            _ = _server.SendAsync(Messages.ExportStart(state.Models.Count, state.TotalElements, _activeProjectId, projectUniqueId));
 
             // Start chunked processing
             ProcessExportChunk(state);
