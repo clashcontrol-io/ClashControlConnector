@@ -394,6 +394,12 @@ namespace ClashControlConnector
             _exportCts?.Cancel();
             _exportCts = new CancellationTokenSource();
 
+            // Classification is a TYPE property; an 82k MEP model has thousands of
+            // instances sharing a handful of types. Reset the per-type cache so each
+            // type's parameters are walked once per export, not once per instance
+            // (that per-instance walk was the main cost the classification fix added).
+            PropertyExporter.ResetClassificationCache();
+
             // Store projectId for use in live update messages
             if (projectId != null)
                 _activeProjectId = projectId;
