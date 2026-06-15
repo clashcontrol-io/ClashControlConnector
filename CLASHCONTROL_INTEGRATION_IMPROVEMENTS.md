@@ -337,6 +337,33 @@ See section 16 above.
 
 ---
 
+## C7. Export Scoping — Categories + Model Filter
+
+### Problem
+ClashControl already sends `{ categories: [...], modelFilter: {...} }` on the `export`
+message, but the connector ignored both — it always exported every model using the
+category set configured in the connector's own settings UI. A user who scoped the pull
+in the browser still paid for a full extraction.
+
+### What the plugin does
+- **`categories`**: when present, the requested category names (mapped through the
+  connector's `CategoryNameMap`) define the pull's scope, overriding the local settings.
+  The `FilteredElementCollector` is constrained with a single native
+  `ElementMulticategoryFilter` rather than collecting every element and filtering in
+  managed code. An unrecognized/empty list falls back to the settings scope rather than
+  exporting nothing. Live updates for the session reuse the same resolved scope.
+- **`modelFilter`**: restricts which models are exported by name. Accepts a single
+  object (`{name}`), a bare string, or an **array** of either for multi-model selection.
+  Applies to both the host and linked documents; a model is collected only if it matches.
+  Matching is case-insensitive against the disambiguated display name and the raw
+  document title (with and without the `.rvt` suffix). Absent/empty → export everything.
+
+### Impact on browser
+None — this honors fields ClashControl already sends. Sending `modelFilter` as an array
+now selects multiple models in one pull.
+
+---
+
 ## Summary of New Message Types to Support
 
 | Direction | Type | Action |
@@ -350,6 +377,8 @@ See section 16 above.
 | Browser → Plugin | `cancel-export` | **NEW** — abort running export |
 | Browser → Plugin | `clear-highlights` | **NEW** — remove all Revit overrides |
 | Browser → Plugin | `export` | Should include `projectId` for routing |
+| Browser → Plugin | `export` | Honors `categories` (scope pull to category subset) |
+| Browser → Plugin | `export` | Honors `modelFilter` (object/string or **array** of model names) |
 | Plugin → Browser | `selection-changed` | **NEW** — Revit selection sync with `globalIds` |
 | Browser → Plugin | `camera-sync` | **NEW** — browser camera position for Revit sync |
 | Plugin → Browser | `camera-sync` | **NEW** — Revit camera position for browser sync |

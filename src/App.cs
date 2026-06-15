@@ -38,6 +38,10 @@ namespace ClashControlConnector
         private static bool _lastKnownConnected;
         private static UIControlledApplication _uiApp;
         private static HashSet<BuiltInCategory> _allowedCategories;
+        // Category scope of the most recent pull (request-supplied or, when the
+        // browser didn't scope it, the settings-derived set). Live updates reuse this
+        // so streamed edits match exactly what the established session pulled.
+        private static HashSet<BuiltInCategory> _activeAllowedCategories;
         // DocKey of the host Revit document from the most recent export.
         // Used to filter DocumentChanged events so that edits in unrelated
         // open docs (including linked models opened as main docs elsewhere)
@@ -247,6 +251,7 @@ namespace ClashControlConnector
             _highlightedElementIds.Clear();
             _debouncer?.Clear();
             _allowedCategories = null;
+            _activeAllowedCategories = null;
             _lastSelection.Clear();
             _activeProjectId = null;
             _lastCameraEye = null;
@@ -286,7 +291,12 @@ namespace ClashControlConnector
                     case "export":
                         var knownElements = msg["knownElements"]?.ToObject<Dictionary<string, string>>();
                         var projectId = msg["projectId"]?.ToString();
-                        RevitCommandHandler.Enqueue(app => ExportModel(app, knownElements, projectId));
+                        // Scope the pull to what ClashControl asked for. Both fields are
+                        // optional — when absent we fall back to the connector's own
+                        // settings (categories) and export every model (modelFilter).
+                        var requestCategories = msg["categories"]?.ToObject<List<string>>();
+                        var modelFilter = ParseModelFilter(msg["modelFilter"]);
+                        RevitCommandHandler.Enqueue(app => ExportModel(app, knownElements, projectId, requestCategories, modelFilter));
                         break;
 
                     case "cancel-export":
@@ -387,7 +397,7 @@ namespace ClashControlConnector
             public int TotalElements;
         }
 
-        private static void ExportModel(UIApplication uiApp, Dictionary<string, string> knownElements = null, string projectId = null)
+        private static void ExportModel(UIApplication uiApp, Dictionary<string, string> knownElements = null, string projectId = null, List<string> requestCategories = null, HashSet<string> modelFilter = null)
         {
             var doc = uiApp.ActiveUIDocument?.Document;
             if (doc == null)
@@ -430,8 +440,12 @@ namespace ClashControlConnector
             if (!isDeltaExport)
                 _cache.Clear();
 
-            // Collect host model elements first
-            var allowed = GetAllowedCategories();
+            // Collect host model elements first. Honor the categories ClashControl
+            // requested for this pull; fall back to the connector's own settings when
+            // the browser didn't scope the request. Remember the resolved set so live
+            // updates stay scoped the same way as the pull that established the session.
+            var allowed = GetAllowedCategories(requestCategories);
+            _activeAllowedCategories = allowed;
             var state = new ExportState
             {
                 KnownElements = knownElements,
@@ -443,18 +457,28 @@ namespace ClashControlConnector
             _hostDocKey = ElementCache.GetDocKey(doc);
             _currentDocTitle = (doc.Title ?? "Host") + ".rvt";
 
-            // Host model — always present, always first
-            var hostInfo = new ModelInfo
+            // Host model — first when included. ClashControl can scope the pull to a
+            // subset of models via modelFilter (e.g. only specific linked docs); skip
+            // the host's collection entirely when it isn't part of that selection.
+            var hostName = (doc.Title ?? "Host") + ".rvt";
+            if (MatchesModelFilter(doc.Title, hostName, modelFilter))
             {
-                ModelId = BuildHostModelId(doc),
-                ModelName = (doc.Title ?? "Host") + ".rvt",
-                Doc = doc,
-                IsLinked = false,
-                Elements = CollectExportableElements(doc, allowed)
-            };
-            state.Models.Add(hostInfo);
-            state.TotalElements += hostInfo.Elements.Count;
-            Debug.WriteLine($"[CC] Host model '{hostInfo.ModelName}' ({hostInfo.ModelId}): {hostInfo.Elements.Count} elements");
+                var hostInfo = new ModelInfo
+                {
+                    ModelId = BuildHostModelId(doc),
+                    ModelName = hostName,
+                    Doc = doc,
+                    IsLinked = false,
+                    Elements = CollectExportableElements(doc, allowed)
+                };
+                state.Models.Add(hostInfo);
+                state.TotalElements += hostInfo.Elements.Count;
+                Debug.WriteLine($"[CC] Host model '{hostInfo.ModelName}' ({hostInfo.ModelId}): {hostInfo.Elements.Count} elements");
+            }
+            else
+            {
+                Debug.WriteLine($"[CC] Host model '{hostName}' excluded by modelFilter");
+            }
 
             // Linked models — each becomes its own ClashControl model so
             // ClashControl can clash them independently.
@@ -480,13 +504,23 @@ namespace ClashControlConnector
                         continue;
                     }
 
+                    // Resolve the display name first (it disambiguates multiple
+                    // instances of the same linked file) so modelFilter can match on
+                    // it before we pay for element collection.
+                    var baseName = (linkDoc.Title ?? "Linked") + ".rvt";
+                    nameCounts.TryGetValue(baseName, out var seen);
+                    nameCounts[baseName] = seen + 1;
+                    var displayName = seen == 0 ? baseName : $"{baseName} ({seen + 1})";
+
+                    if (!MatchesModelFilter(linkDoc.Title, displayName, modelFilter))
+                    {
+                        Debug.WriteLine($"[CC] Linked model '{displayName}' excluded by modelFilter");
+                        continue;
+                    }
+
                     try
                     {
                         var linkElements = CollectExportableElements(linkDoc, allowed);
-                        var baseName = (linkDoc.Title ?? "Linked") + ".rvt";
-                        nameCounts.TryGetValue(baseName, out var seen);
-                        nameCounts[baseName] = seen + 1;
-                        var displayName = seen == 0 ? baseName : $"{baseName} ({seen + 1})";
 
                         // The link's placement in the host (shared-coordinate
                         // offset/rotation). Applied to every element of this link
@@ -1123,7 +1157,7 @@ namespace ClashControlConnector
 
                 var addedElements = new List<Element>();
                 var modifiedElements = new List<Element>();
-                var allowed = GetAllowedCategories();
+                var allowed = _activeAllowedCategories ?? GetAllowedCategories();
 
                 foreach (var eid in added)
                 {
@@ -1244,12 +1278,79 @@ namespace ClashControlConnector
 
         private static List<Element> CollectExportableElements(Document doc, HashSet<BuiltInCategory> allowed)
         {
-            return new FilteredElementCollector(doc)
+            if (allowed == null || allowed.Count == 0)
+                return new List<Element>();
+
+            var collector = new FilteredElementCollector(doc)
                 .WhereElementIsNotElementType()
-                .WhereElementIsViewIndependent()
-                .Where(e => e.Category != null && ShouldExport(e.Category, allowed))
-                .Where(e => !IsSkippedCategory(e.Category))
-                .ToList();
+                .WhereElementIsViewIndependent();
+
+            // Constrain the collector to the requested categories with a single native
+            // multi-category filter instead of pulling every element and filtering in
+            // managed code — far cheaper on large models. The allowed set is built from
+            // CategoryNameMap, which never contains a skipped category, so the post-pass
+            // IsSkippedCategory guard is just belt-and-braces for the fallback path.
+            try
+            {
+                var catIds = new List<ElementId>(allowed.Count);
+                foreach (var bic in allowed) catIds.Add(new ElementId(bic));
+                return collector
+                    .WherePasses(new ElementMulticategoryFilter(catIds))
+                    .Where(e => e.Category != null && !IsSkippedCategory(e.Category))
+                    .ToList();
+            }
+            catch
+            {
+                // A category in the set wasn't valid for a native filter — fall back to
+                // collecting everything and filtering in managed code.
+                return collector
+                    .Where(e => e.Category != null && ShouldExport(e.Category, allowed))
+                    .Where(e => !IsSkippedCategory(e.Category))
+                    .ToList();
+            }
+        }
+
+        /// <summary>
+        /// Parse the optional <c>modelFilter</c> field of an export request into a set
+        /// of model names to include. Accepts a single object (<c>{name}</c>), a bare
+        /// string, or an array of either for multi-model selection. Returns null when
+        /// no usable filter was supplied (meaning: export every model).
+        /// </summary>
+        private static HashSet<string> ParseModelFilter(JToken token)
+        {
+            if (token == null || token.Type == JTokenType.Null) return null;
+
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            void AddOne(JToken t)
+            {
+                if (t == null) return;
+                string name = null;
+                if (t.Type == JTokenType.String) name = t.ToString();
+                else if (t.Type == JTokenType.Object) name = t["name"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(name)) names.Add(name.Trim());
+            }
+
+            if (token.Type == JTokenType.Array)
+                foreach (var item in token) AddOne(item);
+            else
+                AddOne(token);
+
+            return names.Count > 0 ? names : null;
+        }
+
+        /// <summary>
+        /// True when a model should be included given the request's modelFilter. A null
+        /// or empty filter includes everything. Matches on the disambiguated display
+        /// name as well as the raw document title (with and without the ".rvt" suffix)
+        /// so ClashControl can name a model however it prefers.
+        /// </summary>
+        private static bool MatchesModelFilter(string title, string displayName, HashSet<string> filter)
+        {
+            if (filter == null || filter.Count == 0) return true;
+            if (!string.IsNullOrEmpty(displayName) && filter.Contains(displayName)) return true;
+            if (!string.IsNullOrEmpty(title) && (filter.Contains(title) || filter.Contains(title + ".rvt"))) return true;
+            return false;
         }
 
         /// <summary>
@@ -1311,6 +1412,29 @@ namespace ClashControlConnector
         public static void InvalidateAllowedCategories()
         {
             _allowedCategories = null;
+        }
+
+        /// <summary>
+        /// Resolve the category scope for a pull. When ClashControl supplies categories
+        /// on the export request they win (mapped through CategoryNameMap); otherwise we
+        /// fall back to the connector's own settings. Request scopes are not cached —
+        /// each pull can ask for a different subset.
+        /// </summary>
+        private static HashSet<BuiltInCategory> GetAllowedCategories(List<string> requestCategories)
+        {
+            if (requestCategories != null && requestCategories.Count > 0)
+            {
+                var allowed = new HashSet<BuiltInCategory>();
+                foreach (var name in requestCategories)
+                {
+                    if (name != null && CategoryNameMap.TryGetValue(name.Trim(), out var bic))
+                        allowed.Add(bic);
+                }
+                // Only honor the request scope if at least one name resolved — an
+                // unrecognized list shouldn't silently export nothing.
+                if (allowed.Count > 0) return allowed;
+            }
+            return GetAllowedCategories();
         }
 
         private static HashSet<BuiltInCategory> GetAllowedCategories()
