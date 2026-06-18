@@ -39,20 +39,25 @@ namespace ClashControlConnector.Core
         {
             _cts = new CancellationTokenSource();
 
-            // Bind BOTH IPv4 and IPv6 loopback. "localhost" resolves to only one
-            // stack on some machines (e.g. [::1] only), so a single localhost/IP
-            // prefix can leave the other stack closed — the browser then gets an
-            // immediate ECONNREFUSED on whichever address we didn't bind. Binding
-            // 127.0.0.1 and [::1] explicitly covers any client resolution.
-            if (TryStartListener(new[] { $"http://127.0.0.1:{_port}/", $"http://[::1]:{_port}/" }))
-                return true;
+            // Try progressively narrower binds. Best case binds BOTH loopback stacks
+            // so the browser connects however it resolves "localhost". If binding one
+            // explicit IP is denied (URL ACL / elevation on locked-down machines) the
+            // combined bind fails atomically, so fall back to each stack alone — IPv4
+            // first, since the browser dials 127.0.0.1 first — and finally to the
+            // "localhost" prefix, which HttpListener special-cases so it never needs
+            // a reservation. This guarantees we never lose IPv4 just because IPv6
+            // (or vice versa) couldn't be bound.
+            string[][] candidates =
+            {
+                new[] { $"http://127.0.0.1:{_port}/", $"http://[::1]:{_port}/" },
+                new[] { $"http://127.0.0.1:{_port}/" },
+                new[] { $"http://[::1]:{_port}/" },
+                new[] { $"http://localhost:{_port}/" },
+            };
 
-            // Fallback: binding an explicit loopback IP can require a URL ACL
-            // reservation / elevation on locked-down machines. HttpListener
-            // special-cases the "localhost" prefix so it never needs one — use it
-            // so the connector still comes up on at least one stack.
-            if (TryStartListener(new[] { $"http://localhost:{_port}/" }))
-                return true;
+            foreach (var prefixes in candidates)
+                if (TryStartListener(prefixes))
+                    return true;
 
             _cts.Dispose();
             _cts = null;
