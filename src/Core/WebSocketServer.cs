@@ -32,28 +32,55 @@ namespace ClashControlConnector.Core
         }
 
         /// <summary>
-        /// Start the WebSocket server. Returns true on success, false if port is in use.
+        /// Start the WebSocket server. Returns true on success, false if the port
+        /// could not be bound (e.g. already in use).
         /// </summary>
         public bool Start()
         {
             _cts = new CancellationTokenSource();
-            _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://localhost:{_port}/");
+
+            // Bind BOTH IPv4 and IPv6 loopback. "localhost" resolves to only one
+            // stack on some machines (e.g. [::1] only), so a single localhost/IP
+            // prefix can leave the other stack closed — the browser then gets an
+            // immediate ECONNREFUSED on whichever address we didn't bind. Binding
+            // 127.0.0.1 and [::1] explicitly covers any client resolution.
+            if (TryStartListener(new[] { $"http://127.0.0.1:{_port}/", $"http://[::1]:{_port}/" }))
+                return true;
+
+            // Fallback: binding an explicit loopback IP can require a URL ACL
+            // reservation / elevation on locked-down machines. HttpListener
+            // special-cases the "localhost" prefix so it never needs one — use it
+            // so the connector still comes up on at least one stack.
+            if (TryStartListener(new[] { $"http://localhost:{_port}/" }))
+                return true;
+
+            _cts.Dispose();
+            _cts = null;
+            return false;
+        }
+
+        /// <summary>
+        /// Attempt to start an HttpListener bound to the given prefixes. Returns
+        /// true and assigns _listener on success; leaves state untouched on failure
+        /// so the caller can try a different prefix set.
+        /// </summary>
+        private bool TryStartListener(string[] prefixes)
+        {
+            var listener = new HttpListener();
+            foreach (var p in prefixes) listener.Prefixes.Add(p);
             try
             {
-                _listener.Start();
+                listener.Start();
             }
             catch (HttpListenerException ex)
             {
-                Debug.WriteLine($"[CC] Failed to start server: {ex.Message}");
-                _listener.Close();
-                _listener = null;
-                _cts.Dispose();
-                _cts = null;
+                Debug.WriteLine($"[CC] Failed to bind {string.Join(", ", prefixes)}: {ex.Message}");
+                try { listener.Close(); } catch { }
                 return false;
             }
+            _listener = listener;
             Task.Run(() => AcceptLoop(_cts.Token));
-            Debug.WriteLine($"[CC] WebSocket server started on ws://localhost:{_port}");
+            Debug.WriteLine($"[CC] WebSocket server started on {string.Join(", ", prefixes)}");
             return true;
         }
 
