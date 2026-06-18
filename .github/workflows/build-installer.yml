@@ -8,7 +8,12 @@ name: Build installer
 #
 # Triggers:
 #   - workflow_dispatch  -> manual run, exe attached as workflow artifact
+#                           (and to the release if dispatched on a v* tag)
 #   - push of a v* tag   -> attaches the exe to a GitHub Release
+#   - workflow_call      -> invoked by auto-release.yml in the SAME run right
+#                           after it creates the tag. Running in-process is what
+#                           sidesteps GitHub's rule that a tag created with the
+#                           default GITHUB_TOKEN can't trigger another workflow.
 #
 # Per-version build steps tolerate failures via continue-on-error so the
 # workflow still ships an installer even if (for example) the Nice3point
@@ -19,6 +24,13 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_call:
+    inputs:
+      release_tag:
+        description: 'Tag to attach the installer to (e.g. v0.1.6). Empty = artifact only.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write   # needed to upload the .exe to a GitHub Release
@@ -125,15 +137,30 @@ jobs:
           path: dist/installer/ClashControlConnectorInstaller.exe
           if-no-files-found: error
 
-      - name: Attach installer to GitHub Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Effective release tag: the workflow_call input wins; otherwise, when this
+      # run was triggered by (or dispatched on) a v* tag, use that tag. Empty means
+      # "no release to attach to" — the artifact upload above is the only output.
+      - name: Resolve release tag
+        id: rel
+        shell: bash
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ] && [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [ -n "$TAG" ]; then
+            echo "Attaching installer to release $TAG"
+          else
+            echo "No release tag — installer available as a workflow artifact only"
+          fi
+
+      - name: Attach installer to GitHub Release
+        if: steps.rel.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.rel.outputs.tag }}
+          # No body/name here on purpose: the release already exists (auto-release
+          # created it with generated notes), and omitting these preserves them —
+          # we only add the .exe asset.
           files: dist/installer/ClashControlConnectorInstaller.exe
-          body: |
-            ClashControl Connector for Revit
-            --------------------------------
-            Single-file installer. Double-click `ClashControlConnectorInstaller.exe`,
-            tick the Revit version(s) you want, click Install.
-
-            This release bundles support for: ${{ env.BUNDLED_VERSIONS }}.

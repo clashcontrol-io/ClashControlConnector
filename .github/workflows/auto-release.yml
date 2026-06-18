@@ -1,9 +1,14 @@
 name: Auto-release
 
 # On every push to main, read the version from src/App.cs.
-# If a tag for that version doesn't exist yet, create it — which
-# triggers build-installer.yml to build the installer and attach
-# it to the GitHub Release automatically.
+# If a tag for that version doesn't exist yet, create it and then build the
+# installer IN THE SAME RUN by calling build-installer.yml as a reusable
+# workflow. We can't rely on the tag push to trigger build-installer on its
+# own: this tag is created with the default GITHUB_TOKEN, and GitHub blocks
+# token-created events from triggering further workflow runs (which is why
+# earlier bot-cut releases shipped without an installer until someone ran the
+# build by hand). Calling it directly runs the build inside this same run, so
+# the limitation never applies.
 
 on:
   push:
@@ -16,6 +21,9 @@ permissions:
 jobs:
   tag-and-release:
     runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.tag_check.outputs.exists == 'false' }}
+      tag: ${{ steps.ver.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +64,18 @@ jobs:
             **Installation:** Download `ClashControlConnectorInstaller.exe` below,
             run it, tick the Revit version(s) you use, click Install.
 
-            > The installer is built and attached by the **Build installer** workflow
-            > triggered by this release tag. If the asset isn't here yet, check the
-            > [Actions tab](../../actions/workflows/build-installer.yml) — it runs
-            > on Windows and takes ~3 minutes.
+            > The installer is built and attached automatically by the **Build
+            > installer** job in this same release run (Windows, ~3 minutes). If the
+            > asset isn't here yet, the build is still running — check the
+            > [Actions tab](../../actions/workflows/auto-release.yml).
+
+  # Build the installer in the SAME run and attach it to the release just
+  # created. Only runs when a new tag was actually created above.
+  build-installer:
+    needs: tag-and-release
+    if: needs.tag-and-release.outputs.created == 'true'
+    uses: ./.github/workflows/build-installer.yml
+    permissions:
+      contents: write
+    with:
+      release_tag: ${{ needs.tag-and-release.outputs.tag }}
