@@ -31,5 +31,25 @@ namespace ClashControlConnector.Protocol
         [JsonProperty("indices")] public string Indices { get; set; }
         [JsonProperty("normals")] public string Normals { get; set; }
         [JsonProperty("color")] public float[] Color { get; set; }
+
+        // Per-material draw ranges into the index buffer. Present only when an element
+        // has more than one material (e.g. a window's frame + glass). Each group is
+        // rendered with its own material so transparent sections (glass, alpha < 1)
+        // render correctly without bleeding onto opaque ones. Omitted (null) for
+        // single-material elements — those use the flat `color` above unchanged.
+        [JsonProperty("groups", NullValueHandling = NullValueHandling.Ignore)]
+        public List<GeometryGroup> Groups { get; set; }
+    }
+
+    /// <summary>
+    /// A contiguous run of the index buffer that shares one material/color. start and
+    /// count are index offsets (triangles × 3). Opaque groups are emitted before
+    /// transparent ones to help the renderer's depth sorting.
+    /// </summary>
+    public class GeometryGroup
+    {
+        [JsonProperty("start")] public int Start { get; set; }
+        [JsonProperty("count")] public int Count { get; set; }
+        [JsonProperty("color")] public float[] Color { get; set; }
     }
 }

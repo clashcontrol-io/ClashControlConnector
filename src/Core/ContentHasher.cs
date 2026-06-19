@@ -31,6 +31,28 @@ namespace ClashControlConnector.Core
                 sb.Append('|');
                 sb.Append(data.Geometry?.Normals ?? "");
 
+                // Colors aren't in the position/normal buffers, so fold them in
+                // explicitly — otherwise a pure material-color change (same geometry)
+                // would hash identical and get skipped as "unchanged" on a delta pull.
+                if (data.Geometry?.Color != null)
+                {
+                    sb.Append('|');
+                    sb.Append(string.Join(",", data.Geometry.Color));
+                }
+                if (data.Geometry?.Groups != null)
+                {
+                    sb.Append('|');
+                    foreach (var g in data.Geometry.Groups)
+                    {
+                        sb.Append(g.Start);
+                        sb.Append(':');
+                        sb.Append(g.Count);
+                        sb.Append(':');
+                        if (g.Color != null) sb.Append(string.Join(",", g.Color));
+                        sb.Append(';');
+                    }
+                }
+
                 if (data.Materials != null)
                 {
                     sb.Append('|');
