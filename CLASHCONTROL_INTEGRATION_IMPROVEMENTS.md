@@ -364,6 +364,43 @@ now selects multiple models in one pull.
 
 ---
 
+## C8. Per-Material Geometry Groups (transparent glass)
+
+### Problem
+Each element's mesh carried a single flat `color`, taken from the element's first
+material. A window has several materials (frame, glass, mullions), so the whole window —
+frame **and** glass — was painted one opaque color. Glass couldn't be transparent and
+rendered as a solid dark panel, occluding everything behind it.
+
+### What the plugin does
+Faces are grouped by `Face.MaterialElementId` when building the mesh. The `geometry`
+object gains an optional `groups` array — contiguous runs of the index buffer, each with
+its own `color` (RGBA, alpha from the material's transparency):
+
+```json
+{
+  "positions": "...", "indices": "...", "normals": "...",
+  "color": [0.8, 0.3, 0.2, 1.0],
+  "groups": [
+    { "start": 0,   "count": 120, "color": [0.8, 0.3, 0.2, 1.0] },
+    { "start": 120, "count": 48,  "color": [0.6, 0.8, 1.0, 0.15] }
+  ]
+}
+```
+
+- `start`/`count` are index-buffer offsets (triangles × 3).
+- Opaque groups are emitted **before** transparent ones (alpha < 1) to help depth sorting.
+- `groups` is **omitted** for single-material elements — those keep the flat `color` path
+  unchanged, so this is fully backward-compatible.
+
+### What the browser does
+When `groups` is present, build the geometry with one `addGroup(start, count, i)` per
+group and an array of materials (`MeshPhongMaterial`), setting `transparent: true` /
+`opacity` on any group whose alpha < 1. Fall back to the single `color` when `groups` is
+absent. (Implemented in `revit-bridge.js`.)
+
+---
+
 ## Summary of New Message Types to Support
 
 | Direction | Type | Action |
@@ -371,6 +408,7 @@ now selects multiple models in one pull.
 | Plugin → Browser | `status` | Now includes `version` field |
 | Plugin → Browser | `element-batch` | Now includes `batchIndex`, `totalBatches` |
 | Plugin → Browser | `model-error` | **NEW** — export failed or cancelled |
+| Plugin → Browser | `element-batch` | `geometry` may include `groups` (per-material color/alpha) |
 | Plugin → Browser | `element-update` | New action `"properties-only"` (no geometry) |
 | Plugin → Browser | `element-update` (deleted) | Now sends both `globalIds` and `revitIds` |
 | Plugin → Browser | `push-clashes-ack` | **NEW** — confirms clash highlighting |
