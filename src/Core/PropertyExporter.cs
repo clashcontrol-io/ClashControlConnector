@@ -33,6 +33,8 @@ namespace ClashControlConnector.Core
             {"Curtain Panels",           "IfcPlate"},
             {"Curtain Wall Mullions",    "IfcMember"},
             {"Generic Models",           "IfcBuildingElementProxy"},
+            {"Structural Connections",   "IfcMechanicalFastener"},
+            {"Topography",               "IfcGeographicElement"},
             {"Ducts",                    "IfcDuctSegment"},
             {"Pipes",                    "IfcPipeSegment"},
             {"Flex Ducts",               "IfcDuctSegment"},
@@ -41,17 +43,21 @@ namespace ClashControlConnector.Core
             {"Pipe Fittings",            "IfcPipeFitting"},
             {"Duct Accessories",         "IfcDuctFitting"},
             {"Pipe Accessories",         "IfcPipeFitting"},
+            {"Air Terminals",            "IfcAirTerminal"},
             {"Mechanical Equipment",     "IfcFlowTerminal"},
             {"Plumbing Fixtures",        "IfcSanitaryTerminal"},
             {"Electrical Equipment",     "IfcElectricDistributionBoard"},
             {"Electrical Fixtures",      "IfcElectricDistributionBoard"},
             {"Cable Trays",              "IfcCableCarrierSegment"},
-            {"Conduits",                 "IfcCableSegment"},
+            // Conduit is a cable CARRIER (a raceway containing wires), not the
+            // cable itself — IfcCableSegment was wrong.
+            {"Conduits",                 "IfcCableCarrierSegment"},
             {"Lighting Fixtures",        "IfcLightFixture"},
             {"Fire Alarm Devices",       "IfcAlarm"},
             {"Sprinklers",               "IfcFireSuppressionTerminal"},
             {"Furniture",                "IfcFurnishingElement"},
             {"Furniture Systems",        "IfcFurnishingElement"},
+            {"Casework",                 "IfcFurniture"},
         };
 
         public static string GetIfcType(Element element)
