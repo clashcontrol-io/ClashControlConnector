@@ -21,6 +21,9 @@ namespace ClashControlConnector.Core
         private readonly Action<HashSet<ElementId>, HashSet<ElementId>, HashSet<ElementId>> _onFlush;
         private Timer _timer;
         private int _flushing;
+        // Set when an explicit flush arrives while another flush is in progress;
+        // the in-flight flush drains it before finishing so the request isn't lost.
+        private int _flushPending;
 
         public ChangeDebouncer(
             Action<HashSet<ElementId>, HashSet<ElementId>, HashSet<ElementId>> onFlush)
@@ -74,36 +77,57 @@ namespace ClashControlConnector.Core
 
         /// <summary>
         /// Flush all accumulated changes to the callback and clear the buffers.
-        /// Guard prevents concurrent flushes from timer and sync events.
+        /// Concurrent flushes are serialized: when a flush is already in progress
+        /// (e.g. the timer fired), an explicit flush is not dropped — it sets a
+        /// pending flag that the in-flight flush drains before returning.
         /// </summary>
         public void Flush()
         {
+            FlushInternal(explicitRequest: true);
+        }
+
+        private void FlushInternal(bool explicitRequest)
+        {
             if (Interlocked.CompareExchange(ref _flushing, 1, 0) != 0)
+            {
+                // Another flush is running. Explicit (sync-triggered) requests must
+                // not be silently lost — ask the in-flight flush to run once more.
+                if (explicitRequest) Interlocked.Exchange(ref _flushPending, 1);
                 return;
+            }
 
             try
             {
-                HashSet<ElementId> modified, added, deleted;
-                lock (_lock)
+                do
                 {
-                    if (_modifiedIds.Count == 0 && _addedIds.Count == 0 && _deletedIds.Count == 0)
-                        return;
-
-                    modified = new HashSet<ElementId>(_modifiedIds);
-                    added = new HashSet<ElementId>(_addedIds);
-                    deleted = new HashSet<ElementId>(_deletedIds);
-
-                    _modifiedIds.Clear();
-                    _addedIds.Clear();
-                    _deletedIds.Clear();
+                    FlushOnce();
                 }
-
-                _onFlush(modified, added, deleted);
+                while (Interlocked.Exchange(ref _flushPending, 0) == 1);
             }
             finally
             {
                 Interlocked.Exchange(ref _flushing, 0);
             }
+        }
+
+        private void FlushOnce()
+        {
+            HashSet<ElementId> modified, added, deleted;
+            lock (_lock)
+            {
+                if (_modifiedIds.Count == 0 && _addedIds.Count == 0 && _deletedIds.Count == 0)
+                    return;
+
+                modified = new HashSet<ElementId>(_modifiedIds);
+                added = new HashSet<ElementId>(_addedIds);
+                deleted = new HashSet<ElementId>(_deletedIds);
+
+                _modifiedIds.Clear();
+                _addedIds.Clear();
+                _deletedIds.Clear();
+            }
+
+            _onFlush(modified, added, deleted);
         }
 
         /// <summary>
@@ -121,7 +145,7 @@ namespace ClashControlConnector.Core
 
         private void TimerFlush(object state)
         {
-            if (HasChanges) Flush();
+            if (HasChanges) FlushInternal(explicitRequest: false);
         }
 
         public void Dispose()
