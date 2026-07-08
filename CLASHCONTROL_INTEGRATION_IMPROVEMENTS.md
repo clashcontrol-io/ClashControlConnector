@@ -352,15 +352,20 @@ in the browser still paid for a full extraction.
   `ElementMulticategoryFilter` rather than collecting every element and filtering in
   managed code. An unrecognized/empty list falls back to the settings scope rather than
   exporting nothing. Live updates for the session reuse the same resolved scope.
-- **`modelFilter`**: restricts which models are exported by name. Accepts a single
-  object (`{name}`), a bare string, or an **array** of either for multi-model selection.
-  Applies to both the host and linked documents; a model is collected only if it matches.
-  Matching is case-insensitive against the disambiguated display name and the raw
-  document title (with and without the `.rvt` suffix). Absent/empty → export everything.
+- **`modelFilter`**: scopes which models are exported. The browser sends the
+  **exclusion form** `{ exclude: ["Model.rvt", ...] }` — an array of raw model names
+  (as the connector announced them on `model-start`) that must NOT be exported. The
+  host and every linked document are matched by **exact display name**, mirroring the
+  browser's `_isExcluded` check — so excluding `"Arch.rvt"` does not also exclude the
+  second instance `"Arch.rvt (2)"`. The **legacy include-by-name form** (a single
+  `{name}` object, a bare string, or an array of either) is still accepted for
+  back-compat and matches case-insensitively against the disambiguated display name
+  and the raw document title (with and without the `.rvt` suffix). Absent/empty →
+  export everything.
 
 ### Impact on browser
-None — this honors fields ClashControl already sends. Sending `modelFilter` as an array
-now selects multiple models in one pull.
+None — this honors fields ClashControl already sends. Excluded linked models are no
+longer transmitted at all (previously the browser had to drop them on receive).
 
 ---
 
