@@ -397,7 +397,7 @@ namespace ClashControlConnector
             public int TotalElements;
         }
 
-        private static void ExportModel(UIApplication uiApp, Dictionary<string, string> knownElements = null, string projectId = null, List<string> requestCategories = null, HashSet<string> modelFilter = null)
+        private static void ExportModel(UIApplication uiApp, Dictionary<string, string> knownElements = null, string projectId = null, List<string> requestCategories = null, ModelFilter modelFilter = null)
         {
             var doc = uiApp.ActiveUIDocument?.Document;
             if (doc == null)
@@ -1311,14 +1311,45 @@ namespace ClashControlConnector
         }
 
         /// <summary>
-        /// Parse the optional <c>modelFilter</c> field of an export request into a set
-        /// of model names to include. Accepts a single object (<c>{name}</c>), a bare
-        /// string, or an array of either for multi-model selection. Returns null when
-        /// no usable filter was supplied (meaning: export every model).
+        /// Parsed form of the optional <c>modelFilter</c> field of an export request.
+        /// Exactly one of the two sets is non-null when the filter is usable.
         /// </summary>
-        private static HashSet<string> ParseModelFilter(JToken token)
+        private class ModelFilter
+        {
+            /// <summary>Legacy include-by-name selection: only listed models export.</summary>
+            public HashSet<string> Include;
+            /// <summary>Exclusion list — listed models are skipped, everything else exports.</summary>
+            public HashSet<string> Exclude;
+        }
+
+        /// <summary>
+        /// Parse the optional <c>modelFilter</c> field of an export request. The browser
+        /// sends the exclusion form <c>{ exclude: ["Model.rvt", ...] }</c> — raw model
+        /// names (as announced on model-start) that must NOT be exported. The legacy
+        /// include-by-name form (a single <c>{name}</c> object, a bare string, or an
+        /// array of either) is still accepted for back-compat. Returns null when no
+        /// usable filter was supplied (meaning: export every model).
+        /// </summary>
+        private static ModelFilter ParseModelFilter(JToken token)
         {
             if (token == null || token.Type == JTokenType.Null) return null;
+
+            // Exclusion form: { exclude: ["Arch.rvt", ...] }. Matching mirrors the
+            // browser's _isExcluded check — exact (case-sensitive) match on the raw
+            // model name the Connector itself announced on model-start, so the names
+            // round-trip verbatim.
+            if (token.Type == JTokenType.Object && token["exclude"] != null
+                && token["exclude"].Type == JTokenType.Array)
+            {
+                var excluded = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var item in token["exclude"])
+                {
+                    if (item.Type != JTokenType.String) continue;
+                    var name = item.ToString();
+                    if (!string.IsNullOrWhiteSpace(name)) excluded.Add(name);
+                }
+                return excluded.Count > 0 ? new ModelFilter { Exclude = excluded } : null;
+            }
 
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -1336,20 +1367,29 @@ namespace ClashControlConnector
             else
                 AddOne(token);
 
-            return names.Count > 0 ? names : null;
+            return names.Count > 0 ? new ModelFilter { Include = names } : null;
         }
 
         /// <summary>
         /// True when a model should be included given the request's modelFilter. A null
-        /// or empty filter includes everything. Matches on the disambiguated display
-        /// name as well as the raw document title (with and without the ".rvt" suffix)
-        /// so ClashControl can name a model however it prefers.
+        /// filter includes everything. Exclusion filters match the disambiguated display
+        /// name exactly (the browser stores and echoes back the raw names we sent, so no
+        /// looser matching is wanted — "Arch.rvt" must not also exclude "Arch.rvt (2)").
+        /// Legacy include filters match case-insensitively on the display name as well
+        /// as the raw document title (with and without the ".rvt" suffix) so
+        /// ClashControl can name a model however it prefers.
         /// </summary>
-        private static bool MatchesModelFilter(string title, string displayName, HashSet<string> filter)
+        private static bool MatchesModelFilter(string title, string displayName, ModelFilter filter)
         {
-            if (filter == null || filter.Count == 0) return true;
-            if (!string.IsNullOrEmpty(displayName) && filter.Contains(displayName)) return true;
-            if (!string.IsNullOrEmpty(title) && (filter.Contains(title) || filter.Contains(title + ".rvt"))) return true;
+            if (filter == null) return true;
+
+            if (filter.Exclude != null)
+                return string.IsNullOrEmpty(displayName) || !filter.Exclude.Contains(displayName);
+
+            var include = filter.Include;
+            if (include == null || include.Count == 0) return true;
+            if (!string.IsNullOrEmpty(displayName) && include.Contains(displayName)) return true;
+            if (!string.IsNullOrEmpty(title) && (include.Contains(title) || include.Contains(title + ".rvt"))) return true;
             return false;
         }
 
