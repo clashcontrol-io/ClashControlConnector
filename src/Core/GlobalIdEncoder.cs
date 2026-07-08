@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Autodesk.Revit.DB;
@@ -71,29 +72,51 @@ namespace ClashControlConnector.Core
             string uniqueId = element.UniqueId;
 
             int lastDash = uniqueId.LastIndexOf('-');
+            if (lastDash < 0) return HashFallback(uniqueId);
+
             string guidPart = uniqueId.Substring(0, lastDash);
             string elementSuffix = uniqueId.Substring(lastDash + 1);
 
-            if (!Guid.TryParse(guidPart, out var episodeGuid))
+            // Revit 2024+ uses 64-bit ElementIds, so the suffix can exceed 8 hex
+            // digits — parse as 64-bit and never throw (Convert.ToUInt32 used to
+            // raise OverflowException here, killing the element's export).
+            if (!Guid.TryParse(guidPart, out var episodeGuid)
+                || !ulong.TryParse(elementSuffix, NumberStyles.HexNumber,
+                       CultureInfo.InvariantCulture, out var elementIdBits))
             {
-                Debug.WriteLine($"[CC] WARNING: Could not parse EpisodeId from UniqueId: {uniqueId}");
-                using (var md5 = MD5.Create())
-                {
-                    var hash = md5.ComputeHash(Encoding.UTF8.GetBytes(uniqueId));
-                    return ToIfcGlobalId(new Guid(hash));
-                }
+                Debug.WriteLine($"[CC] WARNING: Could not parse UniqueId: {uniqueId}");
+                return HashFallback(uniqueId);
             }
 
-            // XOR the element ID into the last 4 bytes of the GUID
-            uint elementIdBits = Convert.ToUInt32(elementSuffix, 16);
             var guidBytes = episodeGuid.ToByteArray();
 
+            // XOR the element id into the last 8 bytes of the GUID (big-endian).
+            // For ids ≤ 0xFFFFFFFF the high four XORs are no-ops, so 32-bit ids
+            // produce exactly the same GlobalId as before (and as Revit's own
+            // IFC exporter).
+            guidBytes[8]  ^= (byte)((elementIdBits >> 56) & 0xFF);
+            guidBytes[9]  ^= (byte)((elementIdBits >> 48) & 0xFF);
+            guidBytes[10] ^= (byte)((elementIdBits >> 40) & 0xFF);
+            guidBytes[11] ^= (byte)((elementIdBits >> 32) & 0xFF);
             guidBytes[12] ^= (byte)((elementIdBits >> 24) & 0xFF);
             guidBytes[13] ^= (byte)((elementIdBits >> 16) & 0xFF);
             guidBytes[14] ^= (byte)((elementIdBits >> 8) & 0xFF);
             guidBytes[15] ^= (byte)(elementIdBits & 0xFF);
 
             return ToIfcGlobalId(new Guid(guidBytes));
+        }
+
+        /// <summary>
+        /// Deterministic fallback for UniqueIds that don't follow the
+        /// "{EpisodeId}-{hex element id}" shape: hash the whole string.
+        /// </summary>
+        private static string HashFallback(string uniqueId)
+        {
+            using (var md5 = MD5.Create())
+            {
+                var hash = md5.ComputeHash(Encoding.UTF8.GetBytes(uniqueId));
+                return ToIfcGlobalId(new Guid(hash));
+            }
         }
     }
 }
