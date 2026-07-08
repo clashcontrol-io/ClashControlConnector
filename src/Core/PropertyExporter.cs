@@ -33,6 +33,8 @@ namespace ClashControlConnector.Core
             {"Curtain Panels",           "IfcPlate"},
             {"Curtain Wall Mullions",    "IfcMember"},
             {"Generic Models",           "IfcBuildingElementProxy"},
+            {"Structural Connections",   "IfcMechanicalFastener"},
+            {"Topography",               "IfcGeographicElement"},
             {"Ducts",                    "IfcDuctSegment"},
             {"Pipes",                    "IfcPipeSegment"},
             {"Flex Ducts",               "IfcDuctSegment"},
@@ -41,17 +43,21 @@ namespace ClashControlConnector.Core
             {"Pipe Fittings",            "IfcPipeFitting"},
             {"Duct Accessories",         "IfcDuctFitting"},
             {"Pipe Accessories",         "IfcPipeFitting"},
+            {"Air Terminals",            "IfcAirTerminal"},
             {"Mechanical Equipment",     "IfcFlowTerminal"},
             {"Plumbing Fixtures",        "IfcSanitaryTerminal"},
             {"Electrical Equipment",     "IfcElectricDistributionBoard"},
             {"Electrical Fixtures",      "IfcElectricDistributionBoard"},
             {"Cable Trays",              "IfcCableCarrierSegment"},
-            {"Conduits",                 "IfcCableSegment"},
+            // Conduit is a cable CARRIER (a raceway containing wires), not the
+            // cable itself — IfcCableSegment was wrong.
+            {"Conduits",                 "IfcCableCarrierSegment"},
             {"Lighting Fixtures",        "IfcLightFixture"},
             {"Fire Alarm Devices",       "IfcAlarm"},
             {"Sprinklers",               "IfcFireSuppressionTerminal"},
             {"Furniture",                "IfcFurnishingElement"},
             {"Furniture Systems",        "IfcFurnishingElement"},
+            {"Casework",                 "IfcFurniture"},
         };
 
         public static string GetIfcType(Element element)
@@ -91,6 +97,12 @@ namespace ClashControlConnector.Core
                 data.Type = typeElem?.Name ?? "";
             }
 
+            // Description — instance parameter first, then the type's.
+            data.Description = GetDescription(element, typeElem);
+
+            // Common quantities in SI units — omitted (null) when none present.
+            data.Quantities = ExtractQuantities(element, typeElem);
+
             // Materials
             var materialIds = element.GetMaterialIds(false);
             data.Materials = materialIds
@@ -127,6 +139,88 @@ namespace ClashControlConnector.Core
                 ExtractClassificationFromType(typeElem, data);
 
             return data;
+        }
+
+        /// <summary>
+        /// Element description from BuiltInParameter.ALL_MODEL_DESCRIPTION, falling
+        /// back to the type's description. Null when neither is set, so the JSON
+        /// field is omitted entirely.
+        /// </summary>
+        private static string GetDescription(Element element, Element typeElem)
+        {
+            var desc = GetStringParam(element, BuiltInParameter.ALL_MODEL_DESCRIPTION);
+            if (string.IsNullOrWhiteSpace(desc) && typeElem != null)
+                desc = GetStringParam(typeElem, BuiltInParameter.ALL_MODEL_DESCRIPTION);
+            return string.IsNullOrWhiteSpace(desc) ? null : desc;
+        }
+
+        /// <summary>
+        /// Common quantity values converted from Revit internal units (feet-based) to
+        /// SI: lengths in m, areas in m², volumes in m³. Uses the classic computed
+        /// quantity BuiltInParameters where they exist across all supported Revit
+        /// versions, and name-based lookup for the dimension parameters — the same
+        /// version-agnostic approach as ComputeTypeClassification (version-specific
+        /// BuiltInParameter ids have been removed between Revit releases before).
+        /// Returns null when the element carries none, so the field is omitted.
+        /// </summary>
+        private static Dictionary<string, double> ExtractQuantities(Element element, Element typeElem)
+        {
+            Dictionary<string, double> q = null;
+
+            void Add(string name, double? feetValue, int power)
+            {
+                // Skip absent and non-positive values — a zero Length/Area/Volume
+                // carries no information and would just bloat the payload.
+                if (!feetValue.HasValue || feetValue.Value <= 0) return;
+                double scale = power == 3 ? 0.3048 * 0.3048 * 0.3048
+                             : power == 2 ? 0.3048 * 0.3048
+                             : 0.3048;
+                if (q == null) q = new Dictionary<string, double>();
+                if (!q.ContainsKey(name))
+                    q[name] = Math.Round(feetValue.Value * scale, 4);
+            }
+
+            Add("Length", GetDoubleParam(element, typeElem, BuiltInParameter.CURVE_ELEM_LENGTH), 1);
+            Add("Area", GetDoubleParam(element, typeElem, BuiltInParameter.HOST_AREA_COMPUTED), 2);
+            Add("Volume", GetDoubleParam(element, typeElem, BuiltInParameter.HOST_VOLUME_COMPUTED), 3);
+            // First present entry wins (Add skips existing keys), so the built-in
+            // computed parameters above take precedence over name-based lookups.
+            Add("Length", GetDoubleParamByName(element, typeElem, "Length"), 1);
+            Add("Width", GetDoubleParamByName(element, typeElem, "Width"), 1);
+            Add("Height", GetDoubleParamByName(element, typeElem, "Height"), 1);
+            Add("Thickness", GetDoubleParamByName(element, typeElem, "Thickness"), 1);
+
+            return q;
+        }
+
+        private static string GetStringParam(Element element, BuiltInParameter bip)
+        {
+            try { return element.get_Parameter(bip)?.AsString(); }
+            catch { return null; }
+        }
+
+        private static double? GetDoubleParam(Element element, Element typeElem, BuiltInParameter bip)
+        {
+            try
+            {
+                var p = element.get_Parameter(bip);
+                if ((p == null || !p.HasValue) && typeElem != null) p = typeElem.get_Parameter(bip);
+                if (p != null && p.HasValue && p.StorageType == StorageType.Double) return p.AsDouble();
+            }
+            catch { /* parameter unavailable on this element/version */ }
+            return null;
+        }
+
+        private static double? GetDoubleParamByName(Element element, Element typeElem, string name)
+        {
+            try
+            {
+                var p = element.LookupParameter(name);
+                if ((p == null || !p.HasValue) && typeElem != null) p = typeElem.LookupParameter(name);
+                if (p != null && p.HasValue && p.StorageType == StorageType.Double) return p.AsDouble();
+            }
+            catch { /* parameter unavailable on this element */ }
+            return null;
         }
 
         // Parameter names (lower-cased, separators stripped) that carry a

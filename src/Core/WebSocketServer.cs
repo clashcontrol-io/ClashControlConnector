@@ -19,6 +19,9 @@ namespace ClashControlConnector.Core
         private HttpListener _listener;
         private CancellationTokenSource _cts;
         private volatile WebSocket _client;
+        // Guards swaps of _client (hot-swap on new connection, clear on disconnect)
+        // so a concurrent accept/disconnect can't act on the wrong socket.
+        private readonly object _clientLock = new object();
         private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
         private readonly int _port;
 
@@ -136,23 +139,56 @@ namespace ClashControlConnector.Core
                     }
 
                     var wsContext = await context.AcceptWebSocketAsync(null);
+                    var newClient = wsContext.WebSocket;
 
-                    // Close previous client if any
-                    var oldClient = _client;
-                    if (oldClient?.State == WebSocketState.Open)
+                    // Hot-swap: replace the previous client atomically, then close it
+                    // in the background so the accept loop is never blocked.
+                    WebSocket oldClient;
+                    lock (_clientLock)
+                    {
+                        oldClient = _client;
+                        _client = newClient;
+                    }
+                    if (oldClient != null && oldClient.State == WebSocketState.Open)
+                    {
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await oldClient.CloseAsync(
+                                    WebSocketCloseStatus.NormalClosure, "New client", CancellationToken.None)
+                                    .ConfigureAwait(false);
+                            }
+                            catch { /* ignore close errors on old client */ }
+                        });
+                    }
+
+                    Debug.WriteLine("[CC] Client connected");
+
+                    // Receive in the background so the accept loop returns to
+                    // GetContextAsync immediately — a second client's upgrade must
+                    // not hang until the first disconnects (that also kept the
+                    // hot-swap above from ever running while connected).
+                    _ = Task.Run(async () =>
                     {
                         try
                         {
-                            await oldClient.CloseAsync(
-                                WebSocketCloseStatus.NormalClosure, "New client", CancellationToken.None)
-                                .ConfigureAwait(false);
+                            await ReceiveLoop(newClient, ct).ConfigureAwait(false);
                         }
-                        catch { /* ignore close errors on old client */ }
-                    }
-                    _client = wsContext.WebSocket;
-
-                    Debug.WriteLine("[CC] Client connected");
-                    await ReceiveLoop(wsContext.WebSocket, ct);
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine($"[CC] Receive loop error: {ex.Message}");
+                        }
+                        finally
+                        {
+                            // Drop our reference only if this socket is still current
+                            // (it may already have been hot-swapped by a newer client).
+                            lock (_clientLock)
+                            {
+                                if (ReferenceEquals(_client, newClient)) _client = null;
+                            }
+                        }
+                    });
                 }
                 catch (ObjectDisposedException) when (ct.IsCancellationRequested)
                 {
@@ -183,21 +219,29 @@ namespace ClashControlConnector.Core
 
                     if (result.MessageType == WebSocketMessageType.Text)
                     {
-                        var ms = new MemoryStream();
-                        ms.Write(buffer, 0, result.Count);
-                        while (!result.EndOfMessage)
+                        string text;
+                        using (var ms = new MemoryStream())
                         {
-                            result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                             ms.Write(buffer, 0, result.Count);
+                            while (!result.EndOfMessage)
+                            {
+                                result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                                ms.Write(buffer, 0, result.Count);
+                            }
+                            text = Encoding.UTF8.GetString(ms.ToArray());
                         }
-
-                        var text = Encoding.UTF8.GetString(ms.ToArray());
                         OnMessage?.Invoke(text);
                     }
                 }
             }
-            catch (WebSocketException) { }
-            catch (OperationCanceledException) { }
+            catch (WebSocketException ex)
+            {
+                Debug.WriteLine($"[CC] Receive error: {ex.Message}");
+            }
+            catch (OperationCanceledException)
+            {
+                // Server shutting down — expected.
+            }
 
             Debug.WriteLine("[CC] Client disconnected");
         }
@@ -244,13 +288,17 @@ namespace ClashControlConnector.Core
         public void Stop()
         {
             _cts?.Cancel();
-            var ws = _client;
+            WebSocket ws;
+            lock (_clientLock)
+            {
+                ws = _client;
+                _client = null;
+            }
             if (ws?.State == WebSocketState.Open)
             {
                 try { ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Server stopping", CancellationToken.None).Wait(1000); }
                 catch { }
             }
-            _client = null;
             try { _listener?.Stop(); _listener?.Close(); }
             catch { }
             Debug.WriteLine("[CC] WebSocket server stopped");

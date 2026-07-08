@@ -95,6 +95,12 @@ namespace ClashControlConnector.Core
             // browser keeps its existing fast path for those.
             if (groups.Count > 1)
                 geometry.Groups = groups;
+            else if (groups.Count == 1)
+                // Single-material element: surface the resolved face color as the flat
+                // color so the browser renders — and ContentHasher hashes — the actual
+                // material color. Callers only fill Color when the exporter left it
+                // null, so a material color change now invalidates the content hash.
+                geometry.Color = groups[0].Color;
 
             return geometry;
         }
@@ -144,7 +150,16 @@ namespace ClashControlConnector.Core
 
                 // Compute face normal
                 XYZ faceNormal = face.ComputeNormal(new UV(0.5, 0.5));
-                XYZ transformedNormal = transform.IsIdentity ? faceNormal : transform.OfVector(faceNormal);
+                XYZ transformedNormal = faceNormal;
+                if (!transform.IsIdentity)
+                {
+                    // OfVector applies rotation AND any scale in the transform, so
+                    // re-normalize (guarding degenerate zero-length results) — a
+                    // scaled link placement would otherwise break shading.
+                    transformedNormal = transform.OfVector(faceNormal);
+                    if (!transformedNormal.IsZeroLength())
+                        transformedNormal = transformedNormal.Normalize();
+                }
 
                 // Normals: Revit Z-up → Y-up (no scale — unit vectors)
                 float nx = (float)transformedNormal.X;

@@ -20,7 +20,7 @@ namespace ClashControlConnector
 {
     public class App : IExternalApplication
     {
-        public const string Version = "0.1.7";
+        public const string Version = "0.1.8";
 
         private static WsServer _server;
         private static ExternalEvent _externalEvent;
@@ -28,6 +28,9 @@ namespace ClashControlConnector
         private static ElementCache _cache = new ElementCache();
         private static ChangeDebouncer _debouncer;
         private static CancellationTokenSource _exportCts;
+        // Guards cancel/replace/dispose of _exportCts so a cancel-export arriving
+        // mid-swap can't act on the wrong generation.
+        private static readonly object _exportCtsLock = new object();
         private static string _activeProjectId;
         // Host document version captured at export start → sent on model-start so CC
         // can tag a modelInstanceId / freshness stamp (detect "different copy").
@@ -193,9 +196,11 @@ namespace ClashControlConnector
         }
 
         /// <summary>
-        /// Start the WebSocket server. Returns true on success.
+        /// Start the WebSocket server. Returns true on success. Pass the invoking
+        /// UIApplication when available so the currently open document's title is
+        /// reported on the first pong (before any export).
         /// </summary>
-        public static bool StartServer()
+        public static bool StartServer(UIApplication uiApp = null)
         {
             if (_server != null) return true;
 
@@ -209,6 +214,15 @@ namespace ClashControlConnector
             }
 
             _server = server;
+
+            // Capture the active document title so pong reports the open document
+            // even before the first export sets it.
+            try
+            {
+                var title = uiApp?.ActiveUIDocument?.Document?.Title;
+                if (!string.IsNullOrEmpty(title)) _currentDocTitle = title + ".rvt";
+            }
+            catch { /* no active document yet — pong reports none until one opens */ }
 
             // Register document events
             _uiApp.ControlledApplication.DocumentChanged += OnDocumentChanged;
@@ -244,7 +258,15 @@ namespace ClashControlConnector
             _uiApp.ControlledApplication.DocumentOpened -= OnDocumentOpened;
             _uiApp.ControlledApplication.DocumentClosing -= OnDocumentClosing;
 
-            _exportCts?.Cancel();
+            lock (_exportCtsLock)
+            {
+                if (_exportCts != null)
+                {
+                    try { _exportCts.Cancel(); } catch (ObjectDisposedException) { }
+                    _exportCts.Dispose();
+                    _exportCts = null;
+                }
+            }
             _server.Stop();
             _server = null;
             _cache.Clear();
@@ -296,11 +318,14 @@ namespace ClashControlConnector
                         // settings (categories) and export every model (modelFilter).
                         var requestCategories = msg["categories"]?.ToObject<List<string>>();
                         var modelFilter = ParseModelFilter(msg["modelFilter"]);
-                        RevitCommandHandler.Enqueue(app => ExportModel(app, knownElements, projectId, requestCategories, modelFilter));
+                        RevitCommandHandler.Enqueue(app => ExportModel(app, knownElements, projectId, requestCategories, modelFilter), isExport: true);
                         break;
 
                     case "cancel-export":
-                        _exportCts?.Cancel();
+                        lock (_exportCtsLock)
+                        {
+                            try { _exportCts?.Cancel(); } catch (ObjectDisposedException) { }
+                        }
                         break;
 
                     case "highlight":
@@ -332,7 +357,7 @@ namespace ClashControlConnector
 
                     case "resume-session":
                         var resumeKnown = msg["knownElements"]?.ToObject<Dictionary<string, string>>();
-                        RevitCommandHandler.Enqueue(app => HandleResumeSession(app, resumeKnown));
+                        RevitCommandHandler.Enqueue(app => HandleResumeSession(app, resumeKnown), isExport: true);
                         break;
                 }
             }
@@ -397,7 +422,7 @@ namespace ClashControlConnector
             public int TotalElements;
         }
 
-        private static void ExportModel(UIApplication uiApp, Dictionary<string, string> knownElements = null, string projectId = null, List<string> requestCategories = null, HashSet<string> modelFilter = null)
+        private static void ExportModel(UIApplication uiApp, Dictionary<string, string> knownElements = null, string projectId = null, List<string> requestCategories = null, ModelFilter modelFilter = null)
         {
             var doc = uiApp.ActiveUIDocument?.Document;
             if (doc == null)
@@ -406,9 +431,21 @@ namespace ClashControlConnector
                 return;
             }
 
-            // Cancel any in-progress export
-            _exportCts?.Cancel();
-            _exportCts = new CancellationTokenSource();
+            // Cancel any in-progress export and dispose the superseded CTS. The old
+            // token stays usable for in-flight chunks — IsCancellationRequested still
+            // reads true after the source is disposed.
+            CancellationToken exportToken;
+            lock (_exportCtsLock)
+            {
+                var old = _exportCts;
+                if (old != null)
+                {
+                    try { old.Cancel(); } catch (ObjectDisposedException) { }
+                    old.Dispose();
+                }
+                _exportCts = new CancellationTokenSource();
+                exportToken = _exportCts.Token;
+            }
 
             // Classification is a TYPE property; an 82k MEP model has thousands of
             // instances sharing a handful of types. Reset the per-type cache so each
@@ -450,7 +487,7 @@ namespace ClashControlConnector
             {
                 KnownElements = knownElements,
                 IsDeltaExport = isDeltaExport,
-                Ct = _exportCts.Token
+                Ct = exportToken
             };
 
             // Remember which doc is "host" for live-update filtering.
@@ -614,13 +651,13 @@ namespace ClashControlConnector
             System.Threading.Tasks.Task.Run(async () =>
             {
                 try { await System.Threading.Tasks.Task.Delay(1).ConfigureAwait(false); } catch { }
-                RevitCommandHandler.Enqueue(app => RunExportChunk(app, state));
+                RevitCommandHandler.Enqueue(app => RunExportChunk(app, state), isExport: true);
             });
         }
 
         private static void ProcessExportChunk(ExportState state)
         {
-            RevitCommandHandler.Enqueue(app => RunExportChunk(app, state));
+            RevitCommandHandler.Enqueue(app => RunExportChunk(app, state), isExport: true);
         }
 
         private static void RunExportChunk(UIApplication app, ExportState state)
@@ -695,7 +732,11 @@ namespace ClashControlConnector
                         data.Geometry = GeometryExporter.ExtractGeometry(el, model.LinkTransform);
                         if (data.Geometry == null)
                             data.Geometry = new ElementGeometry();
-                        data.Geometry.Color = GetElementColor(el, elDoc);
+                        // The exporter fills Color for single-material elements (so the
+                        // content hash tracks the real face color); only fall back to
+                        // the first-material color when it left Color unset.
+                        if (data.Geometry.Color == null)
+                            data.Geometry.Color = GetElementColor(el, elDoc);
 
                         string contentHash = ContentHasher.ComputeHash(data);
                         model.ElementHashes[data.GlobalId] = contentHash;
@@ -1191,7 +1232,8 @@ namespace ClashControlConnector
                             data.ModelName = hostModelName;
                             data.Geometry = GeometryExporter.ExtractGeometry(el);
                             if (data.Geometry == null) data.Geometry = new ElementGeometry();
-                            data.Geometry.Color = GetElementColor(el, doc);
+                            if (data.Geometry.Color == null)
+                                data.Geometry.Color = GetElementColor(el, doc);
                             _cache.Add(data.GlobalId, doc, el.Id, hostModelId, hostModelName, (data.Geometry.Positions ?? "").GetHashCode());
                             batch.Add(data);
                         }
@@ -1220,7 +1262,8 @@ namespace ClashControlConnector
                             data.ModelName = hostModelName;
                             var geom = GeometryExporter.ExtractGeometry(el);
                             if (geom == null) geom = new ElementGeometry();
-                            geom.Color = GetElementColor(el, doc);
+                            if (geom.Color == null)
+                                geom.Color = GetElementColor(el, doc);
 
                             int newGeomHash = (geom.Positions ?? "").GetHashCode();
 
@@ -1311,14 +1354,45 @@ namespace ClashControlConnector
         }
 
         /// <summary>
-        /// Parse the optional <c>modelFilter</c> field of an export request into a set
-        /// of model names to include. Accepts a single object (<c>{name}</c>), a bare
-        /// string, or an array of either for multi-model selection. Returns null when
-        /// no usable filter was supplied (meaning: export every model).
+        /// Parsed form of the optional <c>modelFilter</c> field of an export request.
+        /// Exactly one of the two sets is non-null when the filter is usable.
         /// </summary>
-        private static HashSet<string> ParseModelFilter(JToken token)
+        private class ModelFilter
+        {
+            /// <summary>Legacy include-by-name selection: only listed models export.</summary>
+            public HashSet<string> Include;
+            /// <summary>Exclusion list — listed models are skipped, everything else exports.</summary>
+            public HashSet<string> Exclude;
+        }
+
+        /// <summary>
+        /// Parse the optional <c>modelFilter</c> field of an export request. The browser
+        /// sends the exclusion form <c>{ exclude: ["Model.rvt", ...] }</c> — raw model
+        /// names (as announced on model-start) that must NOT be exported. The legacy
+        /// include-by-name form (a single <c>{name}</c> object, a bare string, or an
+        /// array of either) is still accepted for back-compat. Returns null when no
+        /// usable filter was supplied (meaning: export every model).
+        /// </summary>
+        private static ModelFilter ParseModelFilter(JToken token)
         {
             if (token == null || token.Type == JTokenType.Null) return null;
+
+            // Exclusion form: { exclude: ["Arch.rvt", ...] }. Matching mirrors the
+            // browser's _isExcluded check — exact (case-sensitive) match on the raw
+            // model name the Connector itself announced on model-start, so the names
+            // round-trip verbatim.
+            if (token.Type == JTokenType.Object && token["exclude"] != null
+                && token["exclude"].Type == JTokenType.Array)
+            {
+                var excluded = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var item in token["exclude"])
+                {
+                    if (item.Type != JTokenType.String) continue;
+                    var name = item.ToString();
+                    if (!string.IsNullOrWhiteSpace(name)) excluded.Add(name);
+                }
+                return excluded.Count > 0 ? new ModelFilter { Exclude = excluded } : null;
+            }
 
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -1336,20 +1410,29 @@ namespace ClashControlConnector
             else
                 AddOne(token);
 
-            return names.Count > 0 ? names : null;
+            return names.Count > 0 ? new ModelFilter { Include = names } : null;
         }
 
         /// <summary>
         /// True when a model should be included given the request's modelFilter. A null
-        /// or empty filter includes everything. Matches on the disambiguated display
-        /// name as well as the raw document title (with and without the ".rvt" suffix)
-        /// so ClashControl can name a model however it prefers.
+        /// filter includes everything. Exclusion filters match the disambiguated display
+        /// name exactly (the browser stores and echoes back the raw names we sent, so no
+        /// looser matching is wanted — "Arch.rvt" must not also exclude "Arch.rvt (2)").
+        /// Legacy include filters match case-insensitively on the display name as well
+        /// as the raw document title (with and without the ".rvt" suffix) so
+        /// ClashControl can name a model however it prefers.
         /// </summary>
-        private static bool MatchesModelFilter(string title, string displayName, HashSet<string> filter)
+        private static bool MatchesModelFilter(string title, string displayName, ModelFilter filter)
         {
-            if (filter == null || filter.Count == 0) return true;
-            if (!string.IsNullOrEmpty(displayName) && filter.Contains(displayName)) return true;
-            if (!string.IsNullOrEmpty(title) && (filter.Contains(title) || filter.Contains(title + ".rvt"))) return true;
+            if (filter == null) return true;
+
+            if (filter.Exclude != null)
+                return string.IsNullOrEmpty(displayName) || !filter.Exclude.Contains(displayName);
+
+            var include = filter.Include;
+            if (include == null || include.Count == 0) return true;
+            if (!string.IsNullOrEmpty(displayName) && include.Contains(displayName)) return true;
+            if (!string.IsNullOrEmpty(title) && (include.Contains(title) || include.Contains(title + ".rvt"))) return true;
             return false;
         }
 
@@ -1476,23 +1559,47 @@ namespace ClashControlConnector
 
     public class RevitCommandHandler : IExternalEventHandler
     {
-        private static readonly ConcurrentQueue<Action<UIApplication>> _queue
-            = new ConcurrentQueue<Action<UIApplication>>();
+        private sealed class QueueItem
+        {
+            public Action<UIApplication> Action;
+            // Export-related actions report failures as model-error (which drives
+            // the browser's keep-partial UX); everything else as a generic error.
+            public bool IsExport;
+        }
+
+        private static readonly ConcurrentQueue<QueueItem> _queue
+            = new ConcurrentQueue<QueueItem>();
 
         public static ExternalEvent Event { get; set; }
 
-        public static void Enqueue(Action<UIApplication> action)
+        public static void Enqueue(Action<UIApplication> action, bool isExport = false)
         {
-            _queue.Enqueue(action);
+            _queue.Enqueue(new QueueItem { Action = action, IsExport = isExport });
             Event?.Raise();
         }
 
         public void Execute(UIApplication app)
         {
-            while (_queue.TryDequeue(out var action))
+            while (_queue.TryDequeue(out var item))
             {
-                try { action(app); }
-                catch (Exception ex) { Debug.WriteLine($"[CC] Handler error: {ex.Message}"); }
+                try { item.Action(app); }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[CC] Handler error: {ex.Message}");
+                    // Surface the failure to the browser instead of dying silently —
+                    // otherwise an aborted export leaves the loading overlay hanging.
+                    try
+                    {
+                        var server = App.Server;
+                        if (server != null)
+                        {
+                            _ = server.SendAsync(item.IsExport
+                                ? Messages.ModelError(ex.Message, 0)
+                                : Messages.Error(ex.Message));
+                        }
+                    }
+                    catch { /* never let error reporting break the queue drain */ }
+                }
             }
         }
 
