@@ -732,7 +732,11 @@ namespace ClashControlConnector
                         data.Geometry = GeometryExporter.ExtractGeometry(el, model.LinkTransform);
                         if (data.Geometry == null)
                             data.Geometry = new ElementGeometry();
-                        data.Geometry.Color = GetElementColor(el, elDoc);
+                        // The exporter fills Color for single-material elements (so the
+                        // content hash tracks the real face color); only fall back to
+                        // the first-material color when it left Color unset.
+                        if (data.Geometry.Color == null)
+                            data.Geometry.Color = GetElementColor(el, elDoc);
 
                         string contentHash = ContentHasher.ComputeHash(data);
                         model.ElementHashes[data.GlobalId] = contentHash;
@@ -1228,7 +1232,8 @@ namespace ClashControlConnector
                             data.ModelName = hostModelName;
                             data.Geometry = GeometryExporter.ExtractGeometry(el);
                             if (data.Geometry == null) data.Geometry = new ElementGeometry();
-                            data.Geometry.Color = GetElementColor(el, doc);
+                            if (data.Geometry.Color == null)
+                                data.Geometry.Color = GetElementColor(el, doc);
                             _cache.Add(data.GlobalId, doc, el.Id, hostModelId, hostModelName, (data.Geometry.Positions ?? "").GetHashCode());
                             batch.Add(data);
                         }
@@ -1257,7 +1262,8 @@ namespace ClashControlConnector
                             data.ModelName = hostModelName;
                             var geom = GeometryExporter.ExtractGeometry(el);
                             if (geom == null) geom = new ElementGeometry();
-                            geom.Color = GetElementColor(el, doc);
+                            if (geom.Color == null)
+                                geom.Color = GetElementColor(el, doc);
 
                             int newGeomHash = (geom.Positions ?? "").GetHashCode();
 
