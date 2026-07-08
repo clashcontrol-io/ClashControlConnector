@@ -18,6 +18,13 @@ namespace ClashControlConnector.Protocol
         [JsonProperty("modelId")] public string ModelId { get; set; }
         [JsonProperty("modelName", NullValueHandling = NullValueHandling.Ignore)] public string ModelName { get; set; }
         [JsonProperty("materials")] public List<string> Materials { get; set; }
+        // Element description (BuiltInParameter.ALL_MODEL_DESCRIPTION, instance first
+        // then type). Omitted entirely when empty to keep the payload small.
+        [JsonProperty("description", NullValueHandling = NullValueHandling.Ignore)] public string Description { get; set; }
+        // Common quantity values in SI units (m / m² / m³): Length, Area, Volume,
+        // Width, Height, Thickness — whichever are present on the element or its type.
+        // Omitted entirely when none apply.
+        [JsonProperty("quantities", NullValueHandling = NullValueHandling.Ignore)] public Dictionary<string, double> Quantities { get; set; }
         [JsonProperty("parameters")] public Dictionary<string, Dictionary<string, object>> Parameters { get; set; }
         [JsonProperty("hostId")] public string HostId { get; set; }
         [JsonProperty("hostRelationships")] public List<string> HostRelationships { get; set; }
