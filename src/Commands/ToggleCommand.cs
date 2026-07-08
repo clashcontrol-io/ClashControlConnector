@@ -47,7 +47,7 @@ namespace ClashControlConnector.Commands
                     {
                         ApplySettings(form);
 
-                        if (!App.StartServer())
+                        if (!App.StartServer(commandData.Application))
                         {
                             TaskDialog.Show("ClashControl",
                                 "Could not start the connector.\n\n" +
