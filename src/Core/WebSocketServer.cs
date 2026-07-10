@@ -321,9 +321,17 @@ namespace ClashControlConnector.Core
             "http://localhost:5173",
             "http://127.0.0.1:3000",
             "http://127.0.0.1:5173",
-            "null",
         };
 
+        // Deliberately does NOT allow the literal "null" origin: any web page,
+        // anywhere, can force Origin: null on its outbound requests via
+        // <iframe sandbox="allow-scripts">, which would let a hostile site
+        // reach this localhost WebSocket through the victim's browser with no
+        // other interaction. A missing Origin header is still allowed because
+        // non-browser local tools (curl, native apps, test clients) never send
+        // one — browsers always set a truthful Origin on WebSocket handshakes,
+        // so that gap only affects non-browser callers, which the
+        // localhost-binding threat model already trusts.
         private static bool IsOriginAllowed(HttpListenerRequest request)
         {
             var origin = request.Headers["Origin"];
