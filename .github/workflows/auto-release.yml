@@ -39,7 +39,10 @@ jobs:
             echo "::error::Could not locate the AllowedOrigins block in $FILE — refusing to release rather than assume it's safe."
             exit 1
           fi
-          if echo "$BLOCK" | grep -qE '"null"'; then
+          # -i: the HashSet itself is built with StringComparer.OrdinalIgnoreCase,
+          # so "NULL"/"Null"/etc. are equally exploitable at runtime even though
+          # this literal grep is on the source text, not the comparer.
+          if echo "$BLOCK" | grep -qiE '"null"'; then
             echo "::error::$FILE's AllowedOrigins still permits the \"null\" origin (the v0.1.8 vulnerability, fixed on main in c4f60ec) — refusing to release."
             exit 1
           fi
