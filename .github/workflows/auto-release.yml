@@ -19,7 +19,34 @@ permissions:
   contents: write
 
 jobs:
+  # Release gate (added after v0.1.8 shipped with the "null"-origin
+  # WebSocket vulnerability still present — c4f60ec fixed the source on
+  # main, but this workflow's tag-exists check skipped re-releasing until
+  # App.Version was bumped past 0.1.8). Grep-based on purpose: simple and
+  # self-evidently correct beats a clever check nobody can audit at a
+  # glance. If this ever needs to check more than one known-bad pattern,
+  # extend the grep rather than reaching for something fancier.
+  security-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse to release if the WebSocket origin allow-list still permits "null"
+        run: |
+          FILE=src/Core/WebSocketServer.cs
+          BLOCK=$(awk '/AllowedOrigins = new HashSet<string>/,/^        \};/' "$FILE")
+          if [ -z "$BLOCK" ]; then
+            echo "::error::Could not locate the AllowedOrigins block in $FILE — refusing to release rather than assume it's safe."
+            exit 1
+          fi
+          if echo "$BLOCK" | grep -qE '"null"'; then
+            echo "::error::$FILE's AllowedOrigins still permits the \"null\" origin (the v0.1.8 vulnerability, fixed on main in c4f60ec) — refusing to release."
+            exit 1
+          fi
+          echo "Origin allow-list guard passed: \"null\" is not present in AllowedOrigins."
+
   tag-and-release:
+    needs: security-guard
     runs-on: ubuntu-latest
     outputs:
       created: ${{ steps.tag_check.outputs.exists == 'false' }}
@@ -58,6 +85,8 @@ jobs:
           generate_release_notes: true
           body: |
             ## ClashControl Connector ${{ steps.ver.outputs.tag }}
+
+            **Source commit:** [`${{ github.sha }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}) — the installer built below (and the security guard above) both run against exactly this commit, so any built installer can be traced back to the source it came from.
 
             Single-file installer for Revit 2024 / 2025 / 2026 / 2027.
 
