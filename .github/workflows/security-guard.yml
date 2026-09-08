@@ -1,0 +1,42 @@
+name: Security guard
+
+# The same origin-allowlist check auto-release.yml's security-guard job
+# runs before cutting a release (see that file's history: v0.1.8 shipped
+# with the "null"-origin WebSocket vulnerability still present because
+# nothing gated the release). Duplicated here as its own minimal workflow,
+# separate from auto-release.yml, so it also runs on pull requests — a
+# regression is caught at review time, before it can ever reach main or
+# the release pipeline, without touching auto-release.yml's own triggers
+# or jobs. Kept deliberately in sync with (not a refactor of)
+# auto-release.yml's check — if you change one, change both.
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  security-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse to allow a PR that reintroduces the "null" WebSocket origin
+        run: |
+          FILE=src/Core/WebSocketServer.cs
+          BLOCK=$(awk '/AllowedOrigins = new HashSet<string>/,/^        \};/' "$FILE")
+          if [ -z "$BLOCK" ]; then
+            echo "::error::Could not locate the AllowedOrigins block in $FILE — refusing to pass rather than assume it's safe."
+            exit 1
+          fi
+          # -i: the HashSet itself is built with StringComparer.OrdinalIgnoreCase,
+          # so "NULL"/"Null"/etc. are equally exploitable at runtime even though
+          # this literal grep is on the source text, not the comparer.
+          if echo "$BLOCK" | grep -qiE '"null"'; then
+            echo "::error::$FILE's AllowedOrigins would permit the \"null\" origin (the v0.1.8 vulnerability, fixed on main in c4f60ec) — blocking this PR."
+            exit 1
+          fi
+          echo "Origin allow-list guard passed: \"null\" is not present in AllowedOrigins."
