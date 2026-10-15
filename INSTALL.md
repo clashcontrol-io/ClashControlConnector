@@ -157,18 +157,22 @@ Run `ClashControlConnectorInstaller.exe` again and tick the Revit year you actua
 ### "Cannot connect from ClashControl"
 - Click the ClashControl Connector ribbon button in Revit to verify the server is running
 - Make sure no other application is using port 19780
-- Try the quick test: open browser console and run:
+- Try the quick test: open the browser console **on https://www.clashcontrol.io** (the connector only talks to that origin, and needs a pairing token) and run:
   ```javascript
-  var ws = new WebSocket('ws://localhost:19780');
-  ws.onopen = () => console.log('Connected!');
-  ws.onerror = (e) => console.log('Failed', e);
+  _ccRuntime.createBridgePairing().wsUrl('ws://127.0.0.1:19780').then(function (u) {
+    var ws = new WebSocket(u);
+    ws.onopen = () => console.log('Connected!');
+    ws.onerror = (e) => console.log('Failed', e);
+  });
   ```
 - If you see "Connected!" — the server works, the issue is on the ClashControl side
+- A bare `new WebSocket('ws://localhost:19780')` from another page is refused on purpose (403 wrong origin / 401 no pairing token)
 
-### "Connection rejected (403)"
-- The connector validates the browser's origin for security
-- Allowed origins: `clashcontrol.io`, `localhost:3000`, `localhost:5173`, `127.0.0.1:3000`, `127.0.0.1:5173`
-- If you're running ClashControl on a different port, the origin needs to be added to the allowed list in `src/Core/WebSocketServer.cs`
+### "Connection rejected (403 / 401)"
+- The connector validates the browser's origin and requires a short-lived pairing token, for security
+- Allowed origins: `https://www.clashcontrol.io` and `https://clashcontrol.io` only
+- **403** — the page's origin is not allowed. If you self-host or develop ClashControl, set the `CLASHCONTROL_ALLOWED_ORIGINS` environment variable (comma-separated exact origins, e.g. `http://localhost:8000`) and restart Revit
+- **401** — no valid pairing token. ClashControl pairs automatically; reload the ClashControl tab (an older cached copy of the page doesn't know about pairing) and reconnect
 
 ### "Elements not highlighting in Revit"
 - Make sure a model has been pulled (exported) at least once — the connector needs the element cache to resolve IDs

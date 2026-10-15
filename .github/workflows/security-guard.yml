@@ -35,8 +35,19 @@ jobs:
           # -i: the HashSet itself is built with StringComparer.OrdinalIgnoreCase,
           # so "NULL"/"Null"/etc. are equally exploitable at runtime even though
           # this literal grep is on the source text, not the comparer.
-          if echo "$BLOCK" | grep -qiE '"null"'; then
-            echo "::error::$FILE's AllowedOrigins would permit the \"null\" origin (the v0.1.8 vulnerability, fixed on main in c4f60ec) — blocking this PR."
+          if echo "$BLOCK" | grep -qiE '"null"|"\*"|localhost|127\.0\.0\.1|\[::1\]'; then
+            echo "::error::$FILE's AllowedOrigins would permit \"null\", a wildcard, or a localhost/dev origin. Only the ClashControl app origins belong in this block (dev origins go in CLASHCONTROL_ALLOWED_ORIGINS) — blocking this PR."
             exit 1
           fi
-          echo "Origin allow-list guard passed: \"null\" is not present in AllowedOrigins."
+          echo "Origin allow-list guard passed: only the app origins are present in AllowedOrigins."
+
+      # Behavioural check, not just a grep: compile the real WebSocketServer.cs
+      # and drive it over real sockets (origin allow-list, DNS-rebinding Host,
+      # Private Network Access preflight, pairing token before any WebSocket
+      # upgrade). No Revit needed.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: WebSocket access-control tests
+        run: dotnet run --project tests/WsSecurity -c Release

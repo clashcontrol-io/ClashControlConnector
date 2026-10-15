@@ -71,7 +71,7 @@ The plugin extracts geometry as triangulated meshes (base64-encoded Float32/Uint
 Key design decisions:
 - **500ms debounced live updates** — dragging a wall sends 1 update, not 20
 - **Geometry hash diffing** — parameter-only changes skip mesh re-export
-- **Origin validation** — prevents unauthorized websites from accessing your model
+- **Origin validation + pairing** — only the ClashControl web app can connect: the `Origin` must match exactly (`https://www.clashcontrol.io` / `https://clashcontrol.io`), the `Host` must be loopback, and the WebSocket upgrade needs a short-lived (1 hour) pairing token from `POST /pair`. Nothing is streamed to a page that merely reaches `127.0.0.1`. Preflights answer `Access-Control-Allow-Private-Network` for Chromium's Private Network Access. Set `CLASHCONTROL_ALLOWED_ORIGINS` (comma-separated exact origins) to self-host or develop the web app
 - **Element cache** — O(1) lookups for highlight/clash operations instead of full model scans
 
 ## Repository structure
@@ -83,7 +83,8 @@ ClashControlConnector/
 │   ├── ClashControlConnector.addin    — Shared addin manifest
 │   ├── Commands/ToggleCommand.cs      — Ribbon button
 │   ├── Core/
-│   │   ├── WebSocketServer.cs         — localhost WS server with origin validation
+│   │   ├── WebSocketServer.cs         — localhost WS server with origin/host validation + pairing
+│   │   ├── PairingStore.cs            — short-lived pairing tokens (in-memory, SHA-256 digests)
 │   │   ├── GeometryExporter.cs        — Mesh triangulation + coordinate conversion
 │   │   ├── PropertyExporter.cs        — Parameters + IFC type mapping
 │   │   ├── RelationshipExporter.cs    — Host/child pairs for clash suppression

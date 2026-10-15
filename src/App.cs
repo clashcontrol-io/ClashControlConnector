@@ -20,7 +20,7 @@ namespace ClashControlConnector
 {
     public class App : IExternalApplication
     {
-        public const string Version = "0.1.9";
+        public const string Version = "0.1.10";
 
         private static WsServer _server;
         private static ExternalEvent _externalEvent;
