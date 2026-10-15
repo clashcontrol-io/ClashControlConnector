@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
@@ -12,7 +13,14 @@ namespace ClashControlConnector.Core
 {
     /// <summary>
     /// WebSocket server on localhost using built-in HttpListener.
-    /// Accepts a single client at a time with origin validation.
+    /// Accepts a single client at a time. Every request is gated, in order, by:
+    ///   1. Host    - must be a loopback name (DNS-rebinding guard).
+    ///   2. Origin  - when present must exactly match the ClashControl app
+    ///                (or an origin the user opted into); otherwise 403 before
+    ///                anything else happens.
+    ///   3. Pairing - the WebSocket upgrade additionally needs a short-lived
+    ///                token from POST /pair, so geometry is never streamed to a
+    ///                page that merely reached 127.0.0.1.
     /// </summary>
     public class WsServer : IDisposable
     {
@@ -24,6 +32,7 @@ namespace ClashControlConnector.Core
         private readonly object _clientLock = new object();
         private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
         private readonly int _port;
+        private readonly PairingStore _pairing = new PairingStore();
 
         public bool IsClientConnected => _client?.State == WebSocketState.Open;
 
@@ -100,41 +109,84 @@ namespace ClashControlConnector.Core
                 {
                     var context = await _listener.GetContextAsync();
 
-                    if (!IsOriginAllowed(context.Request))
+                    var request = context.Request;
+                    var response = context.Response;
+
+                    // 1. Host: only loopback names. A rebinding attacker's DNS name never matches.
+                    if (!IsHostAllowed(request.Headers["Host"]))
                     {
-                        Debug.WriteLine($"[CC] Rejected connection from origin: {context.Request.Headers["Origin"]}");
-                        context.Response.StatusCode = 403;
-                        context.Response.Close();
+                        Debug.WriteLine($"[CC] Rejected request for host: {request.Headers["Host"]}");
+                        Respond(response, 421, null, null);
                         continue;
                     }
 
-                    if (!context.Request.IsWebSocketRequest)
+                    // 2. Origin. null => header absent (not a cross-origin browser request).
+                    //    Present-but-not-allowed (incl. "" and the literal "null") => 403
+                    //    BEFORE anything runs; CORS alone only hides a response, it does
+                    //    not stop a "simple" cross-site request from being executed.
+                    var origin = request.Headers["Origin"];
+                    if (origin != null && !IsOriginAllowed(origin))
                     {
-                        // Respond to HTTP health checks (e.g. GET /) with status JSON
-                        if (context.Request.HttpMethod == "GET")
+                        Debug.WriteLine($"[CC] Rejected connection from origin: {origin}");
+                        Respond(response, 403, null, null);
+                        continue;
+                    }
+
+                    if (!request.IsWebSocketRequest)
+                    {
+                        var path = request.Url?.AbsolutePath ?? "/";
+
+                        if (request.HttpMethod == "OPTIONS")
                         {
-                            var statusJson = Encoding.UTF8.GetBytes(
-                                $"{{\"status\":\"ok\",\"connectorVersion\":\"{App.Version}\"}}");
-                            context.Response.StatusCode = 200;
-                            context.Response.ContentType = "application/json";
-                            context.Response.Headers.Add("Access-Control-Allow-Origin", "*");
-                            context.Response.ContentLength64 = statusJson.Length;
-                            await context.Response.OutputStream.WriteAsync(statusJson, 0, statusJson.Length);
-                            context.Response.Close();
+                            // CORS + Chromium Private Network Access preflight (public https
+                            // page -> loopback needs Access-Control-Allow-Private-Network).
+                            response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+                            response.Headers.Add("Access-Control-Allow-Headers", "Content-Type, X-CC-Pairing-Token");
+                            response.Headers.Add("Access-Control-Allow-Private-Network", "true");
+                            response.Headers.Add("Access-Control-Max-Age", "600");
+                            Respond(response, 204, null, origin);
                         }
-                        else if (context.Request.HttpMethod == "OPTIONS")
+                        else if (request.HttpMethod == "POST" && path == "/pair")
                         {
-                            context.Response.StatusCode = 204;
-                            context.Response.Headers.Add("Access-Control-Allow-Origin", "*");
-                            context.Response.Headers.Add("Access-Control-Allow-Methods", "GET, OPTIONS");
-                            context.Response.Headers.Add("Access-Control-Allow-Headers", "*");
-                            context.Response.Close();
+                            // Only a real, allow-listed browser origin can pair, and only that
+                            // origin can read the reply.
+                            if (string.IsNullOrEmpty(origin))
+                            {
+                                Respond(response, 400, "{\"error\":\"Origin header required\",\"code\":\"origin_required\"}", null);
+                            }
+                            else
+                            {
+                                var token = _pairing.Issue();
+                                Respond(response, 200,
+                                    $"{{\"token\":\"{token}\",\"expiresIn\":{_pairing.LifetimeSeconds},\"protocol\":1}}",
+                                    origin);
+                            }
+                        }
+                        else if (request.HttpMethod == "GET")
+                        {
+                            // Liveness probe (GET /): version only, nothing sensitive.
+                            Respond(response, 200, $"{{\"status\":\"ok\",\"connectorVersion\":\"{App.Version}\"}}", origin);
                         }
                         else
                         {
-                            context.Response.StatusCode = 400;
-                            context.Response.Close();
+                            Respond(response, 400, null, origin);
                         }
+                        continue;
+                    }
+
+                    // 3. WebSocket upgrade. Browsers always send Origin on a WebSocket
+                    //    handshake, so a missing one is not the ClashControl page; and
+                    //    the pairing token must be valid before we accept anything.
+                    if (string.IsNullOrEmpty(origin))
+                    {
+                        Debug.WriteLine("[CC] Rejected WebSocket upgrade without an Origin");
+                        Respond(response, 403, null, null);
+                        continue;
+                    }
+                    if (!_pairing.IsValid(request.QueryString["cc_token"]))
+                    {
+                        Debug.WriteLine("[CC] Rejected WebSocket upgrade: pairing required");
+                        Respond(response, 401, "{\"error\":\"Pairing required\",\"code\":\"pairing_required\"}", null);
                         continue;
                     }
 
@@ -312,31 +364,92 @@ namespace ClashControlConnector.Core
 
         #region Origin Validation
 
+        // Exact-match allow-list of the ClashControl web app. Anything else (other
+        // sites, localhost dev servers, the literal "null") is refused; to
+        // self-host or develop the web app, list its origin in the
+        // CLASHCONTROL_ALLOWED_ORIGINS environment variable (comma separated).
         private static readonly HashSet<string> AllowedOrigins = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "https://clashcontrol.io",
             "https://www.clashcontrol.io",
-            "https://clashcontrol-io.github.io",
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:5173",
         };
 
         // Deliberately does NOT allow the literal "null" origin: any web page,
         // anywhere, can force Origin: null on its outbound requests via
         // <iframe sandbox="allow-scripts">, which would let a hostile site
         // reach this localhost WebSocket through the victim's browser with no
-        // other interaction. A missing Origin header is still allowed because
-        // non-browser local tools (curl, native apps, test clients) never send
-        // one — browsers always set a truthful Origin on WebSocket handshakes,
-        // so that gap only affects non-browser callers, which the
-        // localhost-binding threat model already trusts.
-        private static bool IsOriginAllowed(HttpListenerRequest request)
+        // other interaction. The caller treats a MISSING header separately
+        // (non-browser request) and the WebSocket path refuses it outright.
+        internal static bool IsOriginAllowed(string origin)
         {
-            var origin = request.Headers["Origin"];
-            if (string.IsNullOrEmpty(origin)) return true;
-            return AllowedOrigins.Contains(origin);
+            if (string.IsNullOrEmpty(origin)) return false;
+            if (AllowedOrigins.Contains(origin)) return true;
+            return ExtraOrigins().Contains(origin);
+        }
+
+        // Exact origins only - no wildcards, never "*" or "null".
+        private static HashSet<string> ExtraOrigins()
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var raw = Environment.GetEnvironmentVariable("CLASHCONTROL_ALLOWED_ORIGINS");
+            if (string.IsNullOrWhiteSpace(raw)) return set;
+            foreach (var part in raw.Split(','))
+            {
+                var o = part.Trim().TrimEnd('/');
+                if (o.Length == 0 || o == "*" || o.Equals("null", StringComparison.OrdinalIgnoreCase)) continue;
+                set.Add(o);
+            }
+            return set;
+        }
+
+        // Host header must name a loopback address (any port).
+        internal static bool IsHostAllowed(string hostHeader)
+        {
+            if (string.IsNullOrWhiteSpace(hostHeader)) return false;
+            var host = hostHeader.Trim().ToLowerInvariant();
+            if (host.StartsWith("["))
+            {
+                var end = host.IndexOf(']');
+                if (end >= 0) host = host.Substring(0, end + 1);
+            }
+            else if (host.Count(c => c == ':') == 1)
+            {
+                host = host.Substring(0, host.IndexOf(':'));
+            }
+            return host == "127.0.0.1" || host == "localhost" || host == "[::1]" || host == "::1";
+        }
+
+        private static void Respond(HttpListenerResponse response, int status, string json, string allowedOrigin)
+        {
+            try
+            {
+                response.StatusCode = status;
+                if (!string.IsNullOrEmpty(allowedOrigin))
+                {
+                    // Echo the already-validated origin; never a wildcard.
+                    response.Headers.Add("Access-Control-Allow-Origin", allowedOrigin);
+                    response.Headers.Add("Vary", "Origin");
+                }
+                if (json != null)
+                {
+                    var bytes = Encoding.UTF8.GetBytes(json);
+                    response.ContentType = "application/json";
+                    response.ContentLength64 = bytes.Length;
+                    response.OutputStream.Write(bytes, 0, bytes.Length);
+                }
+                else
+                {
+                    response.ContentLength64 = 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[CC] Respond error: {ex.Message}");
+            }
+            finally
+            {
+                try { response.Close(); } catch { }
+            }
         }
 
         #endregion

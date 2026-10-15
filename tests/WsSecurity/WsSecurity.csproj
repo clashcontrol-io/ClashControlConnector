@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Standalone regression tests for the localhost WebSocket's access control.
+    Compiles the REAL src/Core/WebSocketServer.cs and PairingStore.cs (neither
+    depends on the Revit API) and drives them over real sockets, so this runs
+    on any machine / CI runner with the .NET 8 SDK - no Revit needed.
+
+        dotnet run (from tests/WsSecurity)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>WsSecurityTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\Core\WebSocketServer.cs" Link="Linked\WebSocketServer.cs" />
+    <Compile Include="..\..\src\Core\PairingStore.cs" Link="Linked\PairingStore.cs" />
+  </ItemGroup>
+
+</Project>
